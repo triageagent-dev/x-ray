@@ -2,15 +2,18 @@ package xray
 
 import (
 	"crypto/ed25519"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -174,8 +177,11 @@ type mcpAuthorizer struct {
 	allowFn func() []string
 	limiter *keyedRateLimiter // per-IP throttle for the public OAuth endpoints
 	logger  zerolog.Logger
-	mu      sync.Mutex
-	codes   map[string]authCode
+	// static holds pre-registered public clients (client_id → exact redirect_uris),
+	// set once before serving and never changed, evicted or persisted.
+	static map[string][]string
+	mu     sync.Mutex
+	codes  map[string]authCode
 	// DCR client registrations live in the package-level oauthClients store (not a
 	// field here) so they can be restored from CR status before this authorizer is
 	// even constructed — see oauthClientStore. ADR-049.
@@ -185,6 +191,7 @@ type mcpAuthorizer struct {
 // the requested resource, and the resolved user/scopes.
 type authCode struct {
 	challenge   string // PKCE code_challenge (S256, base64url, no padding)
+	clientID    string
 	redirectURI string
 	resource    string
 	sub         string
@@ -444,6 +451,9 @@ func (a *mcpAuthorizer) clientRedirectAllowed(clientID, redirectURI string) bool
 	if clientID == "" {
 		return a.dev // prod: a client_id is required; dev: allow unregistered curl
 	}
+	if uris, ok := a.static[clientID]; ok {
+		return slices.Contains(uris, redirectURI)
+	}
 	c, ok := oauthClients.get(clientID)
 	if !ok {
 		// Self-heal instead of rejecting outright: an unknown client_id is usually a
@@ -586,6 +596,20 @@ func (a *mcpAuthorizer) handleAuthorize(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// A pre-registered client's code goes to an https callback shared by every user
+	// of that service, so a link that walks a signed-in user through here could hand
+	// their code to another user's flow. The user approves on a page first (ADR 065).
+	if _, ok := a.static[clientID]; ok {
+		sessTok := ""
+		if c, err := r.Cookie("xray_session"); err == nil {
+			sessTok = c.Value
+		}
+		if !a.consentValid(sessTok, q, q.Get("consent")) {
+			a.renderConsent(w, username, clientID, redirectURI, sessTok, q)
+			return
+		}
+	}
+
 	code := randB64(32)
 	a.mu.Lock()
 	// Bound the map: at cap, evict the oldest code before inserting.
@@ -601,6 +625,7 @@ func (a *mcpAuthorizer) handleAuthorize(w http.ResponseWriter, r *http.Request) 
 	}
 	a.codes[code] = authCode{
 		challenge:   challenge,
+		clientID:    clientID,
 		redirectURI: redirectURI,
 		resource:    a.resource,
 		sub:         sub,
@@ -661,6 +686,16 @@ func (a *mcpAuthorizer) handleToken(w http.ResponseWriter, r *http.Request) {
 	}
 	if resource != "" && resource != ac.resource {
 		tokenError(w, "invalid_target", "resource mismatch")
+		return
+	}
+	// RFC 6749 §4.1.3: the code is redeemed by the client it was issued to, for the
+	// redirect it was issued with.
+	if cid := r.Form.Get("client_id"); ac.clientID != "" && cid != "" && cid != ac.clientID {
+		tokenError(w, "invalid_grant", "code was issued to another client")
+		return
+	}
+	if ru := r.Form.Get("redirect_uri"); ru != "" && ru != ac.redirectURI {
+		tokenError(w, "invalid_grant", "redirect_uri mismatch")
 		return
 	}
 
@@ -796,4 +831,110 @@ func tokenError(w http.ResponseWriter, code, desc string) {
 // hasScope reports whether scopes contains want.
 func hasScope(scopes []string, want string) bool {
 	return slices.Contains(scopes, want)
+}
+
+// SetStaticClient pre-registers a public client with fixed redirect URIs, for an
+// MCP client that is given a client ID instead of registering itself (Claude.ai's
+// custom connector posts the code to its own https callback, which open DCR
+// refuses). The redirect URI must match exactly. Call before serving.
+func (a *mcpAuthorizer) SetStaticClient(clientID string, redirectURIs []string) error {
+	if len(clientID) < 8 {
+		return fmt.Errorf("static MCP client ID %q: at least 8 characters", clientID)
+	}
+	if len(redirectURIs) == 0 {
+		return fmt.Errorf("static MCP client %q: no redirect URI", clientID)
+	}
+	for _, raw := range redirectURIs {
+		u, err := url.Parse(raw)
+		if err != nil || !u.IsAbs() || u.Host == "" || u.Fragment != "" {
+			return fmt.Errorf("static MCP client %q: redirect URI %q must be an absolute URL without a fragment", clientID, raw)
+		}
+		loopback := u.Hostname() == "localhost" || u.Hostname() == "127.0.0.1" || u.Hostname() == "::1"
+		if u.Scheme != "https" && !(u.Scheme == "http" && loopback) {
+			return fmt.Errorf("static MCP client %q: redirect URI %q must be https (http only on loopback)", clientID, raw)
+		}
+	}
+	if a.static == nil {
+		a.static = map[string][]string{}
+	}
+	a.static[clientID] = append([]string(nil), redirectURIs...)
+	return nil
+}
+
+// consentTTL bounds how long an approve link from the consent page stays valid.
+const consentTTL = 5 * time.Minute
+
+// consentParams are the /authorize parameters an approval is bound to.
+var consentParams = []string{"client_id", "redirect_uri", "code_challenge", "code_challenge_method", "state", "resource", "scope"}
+
+// consentToken signs an approval for this browser session and exactly these
+// /authorize parameters, valid until exp.
+func (a *mcpAuthorizer) consentToken(sessTok string, q url.Values, exp time.Time) string {
+	seed := sha256.Sum256(append([]byte("xray-mcp-consent-v1"), a.key.Seed()...))
+	mac := hmac.New(sha256.New, seed[:])
+	mac.Write([]byte(sessTok))
+	for _, k := range consentParams {
+		mac.Write([]byte("\n" + k + "=" + q.Get(k)))
+	}
+	e := strconv.FormatInt(exp.Unix(), 10)
+	mac.Write([]byte("\nexp=" + e))
+	return e + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+// consentValid reports whether tok approves this session and request and has not expired.
+func (a *mcpAuthorizer) consentValid(sessTok string, q url.Values, tok string) bool {
+	e, _, ok := strings.Cut(tok, ".")
+	if !ok {
+		return false
+	}
+	unix, err := strconv.ParseInt(e, 10, 64)
+	if err != nil || time.Now().Unix() >= unix {
+		return false
+	}
+	return hmac.Equal([]byte(tok), []byte(a.consentToken(sessTok, q, time.Unix(unix, 0))))
+}
+
+var consentPage = template.Must(template.New("consent").Parse(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Allow access</title>
+<style>body{font-family:system-ui,sans-serif;background:#000;color:#eee;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}
+main{max-width:28rem;padding:2rem}a{display:inline-block;margin:1rem 1rem 0 0;padding:.6rem 1.2rem;border:1px solid #666;border-radius:.5rem;color:#fff;text-decoration:none}
+a.allow{background:#1d4ed8;border-color:#1d4ed8}code{color:#9cf}</style></head>
+<body><main>
+<h1>Allow access?</h1>
+<p>Signed in as <b>{{.User}}</b>.</p>
+<p><code>{{.Client}}</code> asks to read and write this memory on your behalf. The authorization goes to <b>{{.Host}}</b>.</p>
+<p>Approve only if you started this connection yourself just now.</p>
+<a class="allow" href="{{.Allow}}">Allow</a><a href="{{.Deny}}">Deny</a>
+</main></body></html>`))
+
+// renderConsent shows the approval page for a pre-registered client.
+func (a *mcpAuthorizer) renderConsent(w http.ResponseWriter, username, clientID, redirectURI, sessTok string, q url.Values) {
+	allow := url.Values{}
+	for k, v := range q {
+		if k != "consent" {
+			allow[k] = v
+		}
+	}
+	allow.Set("consent", a.consentToken(sessTok, allow, time.Now().Add(consentTTL)))
+	deny, err := url.Parse(redirectURI)
+	if err != nil {
+		http.Error(w, "invalid_request: bad redirect_uri", http.StatusBadRequest)
+		return
+	}
+	dq := deny.Query()
+	dq.Set("error", "access_denied")
+	if st := q.Get("state"); st != "" {
+		dq.Set("state", st)
+	}
+	deny.RawQuery = dq.Encode()
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = consentPage.Execute(w, map[string]string{
+		"User":   username,
+		"Client": clientID,
+		"Host":   deny.Host,
+		"Allow":  a.issuer + "/authorize?" + allow.Encode(),
+		"Deny":   deny.String(),
+	})
 }

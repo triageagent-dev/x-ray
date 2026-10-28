@@ -108,6 +108,8 @@ helm upgrade --install xray oci://ghcr.io/triageagent-dev/charts/xray \
 
 To give each MCP client a token of its own, which also makes its writes count as `human`, set `mcp.oauth.enabled: true`, uncomment the `--mcp-oauth` lines in `args` and remove `--mcp-address=:8083`. The shared secret still works as a fallback.
 
+Clients that register themselves (Claude Code) need nothing more: open registration accepts loopback and custom-scheme redirect URIs. A client that is given a client ID and posts the code to its own https callback, such as a Claude.ai custom connector, is pre-registered with `--mcp-static-client-id=<id>` and `--mcp-static-client-redirect-uris=<uri>[,<uri>]`; the redirect URI must match exactly. Enter that ID, with no secret, in the connector form.
+
 **Replicas.** The chart runs one. Items and their change events follow the cluster across replicas, but voice quota counters and search-hit pulses are per pod, so keep `replicaCount: 1`.
 
 **Voice.** Voice runs on Gemini Live. Set `--gcp-project` (Vertex AI, with Workload Identity on a service account that has Vertex AI User) or `--gemini-api-key`. The default model, `gemini-3.8-live`, is served on Vertex only in the multi-regions `eu` and `us`, so add `--voice-location=eu`; `--gcp-location` keeps the embeddings location. A browser needs HTTPS (or localhost) for the microphone.

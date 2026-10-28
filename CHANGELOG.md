@@ -3,9 +3,11 @@
 ## [Unreleased]
 
 ### Added
+- **A pre-registered public MCP client with fixed redirect URIs: `--mcp-static-client-id` and `--mcp-static-client-redirect-uris`, with `--mcp-oauth` (ADR-065).** Open registration accepts only loopback and custom-scheme redirect URIs, so a client that is given a client ID and posts the code to its own https callback, such as a Claude.ai custom connector, could not connect. The pre-registered client must use one of its redirect URIs exactly (https, or http on loopback), and the user approves it on a consent page bound to the browser session and the request. Open registration is unchanged.
 - **The server can run under a path of a shared host: a path in `--public-url` (`https://gw.example.com/path`) mounts it there (ADR-064, #68).** X-Ray assumed it owned the host root, so behind a proxy that routes one path to it, redirects, the PWA and the cookies went to the root, and the session cookie reached every other service on the host. With a path, the server serves under it, and the login and logout redirects, the session and state cookies, the PWA manifest and the service worker stay under it. The OAuth metadata is also served at the host root with the path inserted (RFC 8414, RFC 9728), where MCP clients look first; route those two paths to X-Ray as well. The proxy forwards the path unchanged. `make build BASE_PATH=/path` builds the UI for it, and an image is bound to the path it was built for (the server warns at startup if they differ). Without a path nothing changes.
 
 ### Changed
+- `/token` rejects a `client_id` or `redirect_uri` that is sent and does not match the authorization code, for every client (RFC 6749, 4.1.3). PKCE still guards a request that omits them.
 - The CORS and voice WebSocket origin check use the scheme and host of `--public-url`, which is all a browser sends as `Origin`, so a trailing slash or a path no longer breaks them. The service worker starts with an empty `BASE` constant at the host root.
 
 ## [2.9.0] - 2026-11-10

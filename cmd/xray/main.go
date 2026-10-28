@@ -124,6 +124,8 @@ func main() {
 		mcpOAuth                  bool
 		mcpResourceURL            string
 		mcpTokenTTL               time.Duration
+		mcpStaticClientID         string
+		mcpStaticClientRedirects  string
 		episodicTTL               time.Duration
 		retentionSweepInterval    time.Duration
 		trustedProxyHops          int
@@ -190,6 +192,8 @@ func main() {
 	flag.BoolVar(&mcpOAuth, "mcp-oauth", false, "Enable the co-located OAuth 2.1 authorization server for MCP (RFC 9728 discovery + /authorize + /token, mounted on the main server)")
 	flag.StringVar(&mcpResourceURL, "mcp-resource-url", "", "MCP resource URL advertised in OAuth metadata (default: <public-url>/mcp)")
 	flag.DurationVar(&mcpTokenTTL, "mcp-token-ttl", 15*time.Minute, "Lifetime of issued MCP access tokens")
+	flag.StringVar(&mcpStaticClientID, "mcp-static-client-id", "", "Client ID of a pre-registered public MCP client (e.g. a Claude.ai custom connector), with --mcp-oauth")
+	flag.StringVar(&mcpStaticClientRedirects, "mcp-static-client-redirect-uris", "", "Comma-separated redirect URIs of --mcp-static-client-id, matched exactly")
 	flag.DurationVar(&episodicTTL, "episodic-ttl", 7*24*time.Hour, "Max age of an episodic session memory before it is forgotten — dropped from get_recent_memory and deleted by the reaper (0 = never forget). See ADR-020")
 	flag.DurationVar(&retentionSweepInterval, "retention-sweep-interval", time.Hour, "How often the general retention sweep runs, hard-deleting memory items past their StaleAfter deadline (0 = disabled). Durable/config kinds (system_configuration, system_identity, policy, mental_map/map-carrying cells) and episodic memories (owned by --episodic-ttl instead) are exempt regardless of StaleAfter; an item with no StaleAfter set never expires.")
 	flag.IntVar(&trustedProxyHops, "trusted-proxy-hops", 0, "Number of trusted reverse proxies in front of the server (e.g. 1 for a single ingress/LB that appends the client IP). Controls how X-Forwarded-For is read for rate-limit keying: only this many entries from the right are trusted; 0 (default) ignores XFF and keys on the TCP peer address, which cannot be spoofed.")
@@ -621,6 +625,12 @@ func main() {
 		// voice write-gate uses. Empty list ⇒ deny all (fail-closed); the static
 		// --mcp-token-secret bearer remains the out-of-band full-access admin path.
 		mcpAuth.SetAllowFn(func() []string { return configWatcher.Get().WriteAllowedUsers })
+		if mcpStaticClientID != "" || mcpStaticClientRedirects != "" {
+			if err := mcpAuth.SetStaticClient(mcpStaticClientID, splitAndTrim(mcpStaticClientRedirects)); err != nil {
+				log.Fatal().Err(err).Msg("--mcp-static-client-id / --mcp-static-client-redirect-uris")
+			}
+			logger.Info().Str("client_id", mcpStaticClientID).Msg("pre-registered MCP client")
+		}
 		mcpHandler := xray.NewMCPServer(memory, logger, func() string { return mcpTokenVal.Load().(string) }, mcpAuth, cellSyncer, namespace, memMapsDeps, mcpListMemoryMaxLimit, mcpSearchMemoryMaxLimit, mcpRecentMemoryMaxLimit)
 		srv.SetMCPAuth(mcpAuth, mcpHandler)
 		log.Info().Str("issuer", issuer).Str("resource", resourceURL).Bool("dev", dev).Msg("MCP OAuth enabled at /mcp (+ /.well-known, /authorize, /token)")
