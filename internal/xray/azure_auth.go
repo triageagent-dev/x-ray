@@ -80,7 +80,7 @@ func (a *azureAuth) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// Resolved (and allowlist-checked) HERE rather than at the callback, so an
 	// unapproved origin is dropped before it is ever bound to a live login.
 	state := a.newState(resolveUIOrigin(r.URL.Query().Get("ui"), a.cfg.UICallbackOrigins))
-	setStateCookie(w, state)
+	setStateCookie(w, BasePath(a.cfg.PublicURL), state)
 	callbackURL := a.cfg.PublicURL + "/v1/auth/entra/callback"
 	authURL := fmt.Sprintf(
 		"https://login.microsoftonline.com/%s/oauth2/v2.0/authorize?client_id=%s&response_type=code&redirect_uri=%s&scope=openid+profile+email&state=%s",
@@ -98,7 +98,7 @@ func (a *azureAuth) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 	// Bind the callback to the browser that started login: the query state must
 	// match the signed state cookie set in handleLogin. Defeats login-CSRF.
-	clearStateCookie(w)
+	clearStateCookie(w, BasePath(a.cfg.PublicURL))
 	if !stateCookieMatches(r, state) {
 		http.Error(w, "invalid state", http.StatusBadRequest)
 		return
@@ -127,7 +127,7 @@ func (a *azureAuth) handleCallback(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     "xray_session",
 		Value:    token,
-		Path:     "/",
+		Path:     BasePath(a.cfg.PublicURL) + "/",
 		MaxAge:   86400,
 		HttpOnly: true,
 		Secure:   true,
@@ -136,7 +136,7 @@ func (a *azureAuth) handleCallback(w http.ResponseWriter, r *http.Request) {
 	// Same-origin logins land on "/" and use the cookie just set. A login that
 	// asked for an allowlisted UI origin is bounced there with the token
 	// instead, because that host will never receive this cookie.
-	http.Redirect(w, r, uiCallbackRedirect(st.uiOrigin, token), http.StatusFound)
+	http.Redirect(w, r, uiCallbackRedirect(st.uiOrigin, token, BasePath(a.cfg.PublicURL)), http.StatusFound)
 }
 
 func (a *azureAuth) exchangeCode(code string) (string, error) {

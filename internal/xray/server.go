@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -30,6 +31,7 @@ type Server struct {
 	azure         *azureAuth
 	google        *googleAuth
 	allowedOrigin string // CORS origin; empty = "*" (dev only)
+	basePath      string // path the server is mounted under ("/path"); "" at the host root
 	maxBodyBytes  int64  // request body cap for non-WS routes; 0 = unlimited
 	devMu         sync.Mutex
 	devToken      string // session of the built-in dev user (auth disabled only)
@@ -43,12 +45,20 @@ type Server struct {
 type ServerOption func(*serverOptions)
 
 type serverOptions struct {
-	google GoogleOAuthConfig
+	google   GoogleOAuthConfig
+	basePath string
 }
 
 // WithGoogleOAuth turns on Google sign-in.
 func WithGoogleOAuth(cfg GoogleOAuthConfig) ServerOption {
 	return func(o *serverOptions) { o.google = cfg }
+}
+
+// WithBasePath mounts the server under a path (BasePath of the public URL) for
+// a proxy that forwards that path unchanged. Requests outside it are still
+// served as before, which keeps the kubelet probes and in-cluster clients working.
+func WithBasePath(p string) ServerOption {
+	return func(o *serverOptions) { o.basePath = p }
 }
 
 func NewServer(logger zerolog.Logger, memory *MemoryStore, uiFS fs.FS, ghCfg GitHubOAuthConfig, azCfg AzureOAuthConfig, allowedOrigin string, maxBodyBytes int64, config *ConfigWatcher, opts ...ServerOption) *Server {
@@ -64,6 +74,7 @@ func NewServer(logger zerolog.Logger, memory *MemoryStore, uiFS fs.FS, ghCfg Git
 		azure:         newAzureAuth(azCfg),
 		google:        newGoogleAuth(o.google),
 		allowedOrigin: allowedOrigin,
+		basePath:      o.basePath,
 		maxBodyBytes:  maxBodyBytes,
 		config:        config,
 	}
@@ -90,6 +101,14 @@ func (s *Server) SetMCPAuth(auth *mcpAuthorizer, mcpHandler http.Handler) {
 		s.mux.HandleFunc("GET /.well-known/oauth-protected-resource", auth.protectedResourceMetadata)
 		s.mux.HandleFunc("GET /.well-known/oauth-authorization-server", auth.authServerMetadata)
 		s.mux.HandleFunc("GET /.well-known/jwks.json", auth.jwks)
+		// Under a base path, MCP clients look for the documents at the host root
+		// with the path inserted (RFC 8414 §3.1, RFC 9728 §3.1).
+		if p := BasePath(auth.issuer); p != "" {
+			s.mux.HandleFunc("GET /.well-known/oauth-authorization-server"+p, auth.authServerMetadata)
+		}
+		if u, err := url.Parse(auth.resource); err == nil && BasePath(auth.issuer) != "" && strings.TrimSuffix(u.Path, "/") != "" {
+			s.mux.HandleFunc("GET /.well-known/oauth-protected-resource"+u.Path, auth.protectedResourceMetadata)
+		}
 		s.mux.HandleFunc("POST /register", auth.handleRegister)
 		s.mux.HandleFunc("GET /authorize", auth.handleAuthorize)
 		s.mux.HandleFunc("POST /token", auth.handleToken)
@@ -115,14 +134,37 @@ func (s *Server) Handler() http.Handler {
 	if s.allowedOrigin != "" {
 		origins = []string{s.allowedOrigin}
 	}
-	return cors.New(cors.Options{
+	return s.stripBasePath(cors.New(cors.Options{
 		AllowedOrigins: origins,
 		// DELETE + Mcp-Session-Id support the MCP streamable HTTP transport.
 		AllowedMethods:   []string{"GET", "POST", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Authorization", "Content-Type", "Mcp-Session-Id"},
 		ExposedHeaders:   []string{"Mcp-Session-Id", "WWW-Authenticate"},
 		AllowCredentials: false,
-	}).Handler(h)
+	}).Handler(h))
+}
+
+// stripBasePath serves requests under the base path as if they had arrived at
+// the root. The bare base path redirects to its slash form, the UI's home.
+func (s *Server) stripBasePath(next http.Handler) http.Handler {
+	if s.basePath == "" {
+		return next
+	}
+	strip := http.StripPrefix(s.basePath, next)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == s.basePath:
+			target := s.basePath + "/"
+			if r.URL.RawQuery != "" {
+				target += "?" + r.URL.RawQuery
+			}
+			http.Redirect(w, r, target, http.StatusMovedPermanently)
+		case strings.HasPrefix(r.URL.Path, s.basePath+"/"):
+			strip.ServeHTTP(w, r)
+		default:
+			next.ServeHTTP(w, r)
+		}
+	})
 }
 
 // contentSecurityPolicy is served on every response. The Next.js static export
@@ -225,7 +267,7 @@ func (s *Server) requireSession(next http.Handler) http.Handler {
 			w.Write([]byte(`{"error":"unauthorized"}`)) //nolint:errcheck
 			return
 		}
-		http.Redirect(w, r, "/login", http.StatusFound)
+		http.Redirect(w, r, s.basePath+"/login", http.StatusFound)
 	})
 }
 
@@ -759,18 +801,19 @@ func (s *Server) registerMisc() {
 	})
 
 	// PWA manifest — served dynamically.
+	base := s.basePath
 	s.mux.HandleFunc("/manifest.json", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/manifest+json")
 		w.Header().Set("Cache-Control", "public, max-age=3600")
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
-			"id":               "/",
+			"id":               base + "/",
 			"name":             "X-Ray",
 			"short_name":       "X-Ray",
 			"description":      "X-Ray memory runtime",
 			"lang":             "en",
 			"dir":              "ltr",
-			"start_url":        "/",
-			"scope":            "/",
+			"start_url":        base + "/",
+			"scope":            base + "/",
 			"display":          "standalone",
 			"background_color": "#000000",
 			"theme_color":      "#000000",
@@ -778,24 +821,26 @@ func (s *Server) registerMisc() {
 			"categories":       []string{"productivity", "utilities"},
 			"icons": []map[string]string{
 				// Raster PNGs satisfy the Chrome/Android installability check (SVG is rejected there).
-				{"src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
-				{"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
-				{"src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
-				{"src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any"},
+				{"src": base + "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+				{"src": base + "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+				{"src": base + "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
+				{"src": base + "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any"},
 			},
 		})
 	})
 
 	// Service worker — minimal shell cache
+	baseJS, _ := json.Marshal(base) // a JSON string is a JS string literal
+	sw := []byte("const BASE = " + string(baseJS) + ";\n" + xraySW)
 	s.mux.HandleFunc("/sw.js", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/javascript")
 		w.Header().Set("Cache-Control", "no-cache")
-		w.Write([]byte(xraySW)) //nolint:errcheck
+		w.Write(sw) //nolint:errcheck
 	})
 }
 
 const xraySW = `const CACHE = "xray-shell-v1";
-const SHELL = ["/", "/icon.svg", "/manifest.json"];
+const SHELL = [BASE + "/", BASE + "/icon.svg", BASE + "/manifest.json"];
 
 self.addEventListener("install", e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -812,9 +857,9 @@ self.addEventListener("activate", e => {
 self.addEventListener("fetch", e => {
   if (e.request.method !== "GET") return;
   const url = new URL(e.request.url);
-  if (url.pathname.startsWith("/v1/")) return;
+  if (url.pathname.startsWith(BASE + "/v1/")) return;
   e.respondWith(
-    fetch(e.request).catch(() => caches.match(e.request).then(r => r || caches.match("/")))
+    fetch(e.request).catch(() => caches.match(e.request).then(r => r || caches.match(BASE + "/")))
   );
 });
 `

@@ -90,9 +90,14 @@ UI      ?= 1
 UI_DEP  := $(if $(filter 1,$(UI)),ui,)
 WEB_DIR := internal/webui/web
 
-ui: ## Build the web UI (ui/) and stage it for embedding in the binary
+# BASE_PATH=/path builds the UI for a server whose --public-url ends in that path:
+# the export and the API it calls both live under it. The export is bound to it.
+BASE_PATH ?=
+UI_ENV    := $(if $(BASE_PATH),NEXT_BASE_PATH=$(BASE_PATH) NEXT_PUBLIC_API_URL=$(BASE_PATH),)
+
+ui: ## Build the web UI (ui/) and stage it for embedding in the binary (BASE_PATH=/x for a server under /x)
 	@command -v npm >/dev/null 2>&1 || { echo "npm not found: install Node 20+, or build without the UI: make build UI=0"; exit 1; }
-	@cd ui && npm ci --no-audit --no-fund && NEXT_PUBLIC_UI_VERSION=$(VERSION) npm run build
+	@cd ui && npm ci --no-audit --no-fund && $(UI_ENV) NEXT_PUBLIC_UI_VERSION=$(VERSION) npm run build
 	@mkdir -p $(WEB_DIR)
 	@find $(WEB_DIR) -mindepth 1 ! -name .gitkeep -delete
 	@cp -R ui/out/. $(WEB_DIR)/

@@ -56,12 +56,12 @@ func signState(state string) string {
 
 // setStateCookie issues the signed state cookie. Secure+HttpOnly+SameSite=Lax
 // matches the session cookie; Lax is required so the cookie survives the
-// cross-site redirect back from the OAuth provider.
-func setStateCookie(w http.ResponseWriter, state string) {
+// cross-site redirect back from the OAuth provider. base is BasePath(PublicURL).
+func setStateCookie(w http.ResponseWriter, base, state string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     oauthStateCookie,
 		Value:    signState(state),
-		Path:     "/v1/auth/",
+		Path:     base + "/v1/auth/",
 		MaxAge:   600,
 		HttpOnly: true,
 		Secure:   true,
@@ -70,10 +70,10 @@ func setStateCookie(w http.ResponseWriter, state string) {
 }
 
 // clearStateCookie expires the state cookie once the callback has consumed it.
-func clearStateCookie(w http.ResponseWriter) {
+func clearStateCookie(w http.ResponseWriter, base string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     oauthStateCookie,
-		Path:     "/v1/auth/",
+		Path:     base + "/v1/auth/",
 		MaxAge:   -1,
 		HttpOnly: true,
 		Secure:   true,
@@ -627,11 +627,22 @@ func resolveUIOrigin(requested string, allowed []string) string {
 }
 
 // uiCallbackRedirect returns the URL to send the browser to after a successful
-// login: the allowlisted UI's own callback page carrying the token, or "/" when
-// no cross-origin hand-off was requested.
-func uiCallbackRedirect(uiOrigin, token string) string {
+// login: the allowlisted UI's own callback page carrying the token, or the
+// server's home (base + "/") when no cross-origin hand-off was requested.
+func uiCallbackRedirect(uiOrigin, token, base string) string {
 	if uiOrigin == "" {
-		return "/"
+		return base + "/"
 	}
 	return uiOrigin + "/auth/callback?token=" + url.QueryEscape(token)
+}
+
+// BasePath is the path the server is mounted under, taken from its public URL
+// ("https://h.example/path" → "/path"), without a trailing slash; "" at the host
+// root. Redirects and cookie paths the browser receives sit under it.
+func BasePath(publicURL string) string {
+	u, err := url.Parse(publicURL)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimRight(u.Path, "/")
 }

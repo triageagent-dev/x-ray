@@ -551,12 +551,12 @@ func (a *mcpAuthorizer) handleAuthorize(w http.ResponseWriter, r *http.Request) 
 	}
 	if sub == "" {
 		// Not logged in — send the browser to the UI login page. The GitHub/Entra/Google
-		// callback redirects to "/", not back here, so the user re-triggers MCP auth
+		// callback redirects to the server's home, not back here, so the user re-triggers MCP auth
 		// after logging in. We deliberately do NOT pass a next= return target: it
 		// would be an attacker-controlled redirect param on a public endpoint, and
 		// nothing consumes it today. If resume-after-login is ever wired up, route
 		// the value through a same-origin validator — never redirect to it raw.
-		http.Redirect(w, r, "/login", http.StatusFound)
+		http.Redirect(w, r, BasePath(a.issuer)+"/login", http.StatusFound)
 		return
 	}
 

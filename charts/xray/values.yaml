@@ -87,6 +87,8 @@ args:
   # Sign-in, required unless --dev. Create the Secret named by github.secretName
   # (or azure.secretName, google.secretName), set that value, and add:
   # - --public-url=https://xray.example.com
+  #   (a path, https://gw.example.com/path, mounts the server there; the image's
+  #   UI must be built with BASE_PATH=/path)
   # - --github-org=YOUR_GITHUB_ORG      # required with GitHub sign-in (or --allow-any-user)
   #
   # MCP over OAuth on the main port, with a token per user (set mcp.oauth.enabled
