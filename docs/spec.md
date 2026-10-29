@@ -235,6 +235,16 @@ A refusal, such as an unknown kind or a missing item, is a `ToolError` in all th
 
 To make X-Ray the memory of an agent, it is used in three places: a search before the agent answers, memory tools while it answers, and a write afterwards that cites the items it drew on, so that refuting one retires the rest. A separate adapter module implements the Google ADK memory service on either an embedded store or a client, so X-Ray plugs into the ADK runner and its `load_memory` and `preload_memory` tools. Each user's conversations are stored as private notes under the pair of app and user, and shared memory is added to every search.
 
+The engine that the server's store and the `memory` package both run on is public too, for a program that wraps it in its own host. The host brings its own lock, visibility rule, retention function and kind vocabulary; the packages read no global state and use no Kubernetes client.
+
+| Package | Holds |
+|---|---|
+| memstore | `Item`, `Store` and `Searcher`; tags; private ownership, which is a `user:<hash>` tag with the cell's `subject` naming the instance that holds the item; event time; near-duplicate detection; the kind vocabulary; `Lexicon`, the vocabulary index on its own |
+| memstore/index | The HNSW cell index, the embedder and the query cache |
+| memstore/hub | The live event hub. A `Transport` carries events between replicas; without one the hub is local |
+| memstore/cellsync | The decisions made when a cell is reconciled into a store: keep it, delete it at its deadline, forget it, embed it or leave it out of the vector index. Also the conversion of a private cell written with the owner in `subject` to the owner tag |
+| memstore/memtest | Fixtures for a host's tests |
+
 ### REST
 
 The memory routes are read-only. Writes arrive by MCP, by voice, or as objects applied with `kubectl`.

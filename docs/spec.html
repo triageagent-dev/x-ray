@@ -454,6 +454,15 @@ spec:
   </table></div>
   <p>A refusal, such as an unknown kind or a missing item, is a <code>ToolError</code> in all three, and <code>IsNotFound</code> tests for the missing item. The embedded store applies the same rules the server does at its boundary: a kind from the vocabulary, high confidence on a stable fact, a subject on a private item. The credential decides how a write is classed. Over MCP an OAuth token that names a person records <code>human</code> and the shared secret <code>derived</code>; in process, the program chooses with <code>WithOrigin</code>.</p>
   <p>To make X-Ray the memory of an agent, it is used in three places: a search before the agent answers, memory tools while it answers, and a write afterwards that cites the items it drew on, so that refuting one retires the rest. A separate adapter module implements the Google ADK memory service on either an embedded store or a client, so X-Ray plugs into the ADK runner and its <code>load_memory</code> and <code>preload_memory</code> tools. Each user's conversations are stored as private notes under the pair of app and user, and shared memory is added to every search.</p>
+  <p>The engine that the server's store and the <code>memory</code> package both run on is public too, for a program that wraps it in its own host. The host brings its own lock, visibility rule, retention function and kind vocabulary; the packages read no global state and use no Kubernetes client.</p>
+  <div class="tablewrap"><table>
+    <tr><th>Package</th><th>Holds</th></tr>
+    <tr><td class="k">memstore</td><td><code>Item</code>, <code>Store</code> and <code>Searcher</code>; tags; private ownership, which is a <code>user:&lt;hash&gt;</code> tag with the cell's <code>subject</code> naming the instance that holds the item; event time; near-duplicate detection; the kind vocabulary; <code>Lexicon</code>, the vocabulary index on its own</td></tr>
+    <tr><td class="k">memstore/index</td><td>The HNSW cell index, the embedder and the query cache</td></tr>
+    <tr><td class="k">memstore/hub</td><td>The live event hub. A <code>Transport</code> carries events between replicas; without one the hub is local</td></tr>
+    <tr><td class="k">memstore/cellsync</td><td>The decisions made when a cell is reconciled into a store: keep it, delete it at its deadline, forget it, embed it or leave it out of the vector index. Also the conversion of a private cell written with the owner in <code>subject</code> to the owner tag</td></tr>
+    <tr><td class="k">memstore/memtest</td><td>Fixtures for a host's tests</td></tr>
+  </table></div>
   <h3>REST</h3>
   <p>The memory routes are read-only. Writes arrive by MCP, by voice, or as objects applied with <code>kubectl</code>.</p>
   <div class="tablewrap"><table>
