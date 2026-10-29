@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [2.4.4] - 2026-10-29
+
 ### Fixed
 - A deployment that splits one kind into several `ui.categories` by tag (ADR-035) gets each of them capped and counted on its own in the graph. The categories shared the graph's per-kind cap, so the first tag in id order filled it and the others drew few or no nodes, and every such region was labelled with the whole kind's count. `/v1/memory/summary` now caps per category and also returns `totalsByCategory`, which the graph uses for the region labels.
 
