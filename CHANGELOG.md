@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-10-29
+
 ### Added
 - **Google sign-in.** `--google-client-id`, `--google-client-secret` and `--google-domain` (or `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_DOMAIN`, chart `google.secretName`). Only accounts of that Google Workspace domain get a session: the check is on the ID token's `hd` claim, not the email suffix. Without `--google-domain` the server refuses to start unless `--allow-any-user`. Existing deployments derive the same session and MCP signing keys.
 
