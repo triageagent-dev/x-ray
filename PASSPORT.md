@@ -8,14 +8,14 @@
 | Description | Agentic memory substrate for local and Kubernetes use: typed memory as `MemoryCell` custom resources, HNSW + keyword search, a code graph, an embedded web UI, MCP server, REST API, SSE stream and a Gemini Live voice WebSocket |
 | Repo | https://github.com/triageagent-dev/x-ray (public) |
 | Registry | ghcr.io/triageagent-dev/xray |
-| Version | v2.3.0 plus 2 commits on main (`git describe`: v2.3.0-2-gf47ac5e) |
+| Version | v2.4.0 |
 | Go module | github.com/triageagent-dev/x-ray/v2 |
 | Helm chart | charts/xray, version 2.0.0, appVersion v2.0.0 |
 | CRD | xray.triageagent.dev/v1 `MemoryCell` (short name `mcell`, namespaced) |
 | Owner | triageagent-dev (GitHub organization) |
 | License | Apache-2.0 |
 | Passport date | 2026-10-29 |
-| Audit status | No CRITICAL/HIGH CVEs; no HIGH code findings open (v2.3.0-2-gf47ac5e); MEDIUM and LOW code findings open |
+| Audit status | No CRITICAL/HIGH CVEs; no HIGH code findings open (v2.4.0); MEDIUM and LOW code findings open |
 | Code review | Findings open, none HIGH (2026-10-29) |
 
 ## 2. Classification
