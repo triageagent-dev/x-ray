@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [2.4.3] - 2026-10-29
+
 ### Fixed
 - Swiping between tabs on a phone no longer stutters. Every touchmove re-rendered every tab, the Home graph included, and moving the graph repainted its SVG, which draws a drop-shadow filter on every tag line. The drag is now written to the panels once per animation frame, each panel keeps its own compositor layer, and the tab sections are memoised.
 - The item view on a phone slides in when opened and slides out when closed, by the swipe or the back button; it used to appear and vanish at once. Its swipe-to-close re-rendered the item, markdown included, on every touchmove and dropped frames; the drag is now written to its style once per animation frame.
