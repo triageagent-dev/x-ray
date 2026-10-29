@@ -8,15 +8,15 @@
 | Description | Agentic memory substrate for local and Kubernetes use: typed memory as `MemoryCell` custom resources, HNSW + keyword search, a code graph, an embedded web UI, MCP server, REST API, SSE stream and a Gemini Live voice WebSocket |
 | Repo | https://github.com/triageagent-dev/x-ray (public) |
 | Registry | ghcr.io/triageagent-dev/xray |
-| Version | v2.2.1 |
+| Version | v2.3.0 plus 2 commits on main (`git describe`: v2.3.0-2-gf47ac5e) |
 | Go module | github.com/triageagent-dev/x-ray/v2 |
 | Helm chart | charts/xray, version 2.0.0, appVersion v2.0.0 |
 | CRD | xray.triageagent.dev/v1 `MemoryCell` (short name `mcell`, namespaced) |
 | Owner | triageagent-dev (GitHub organization) |
 | License | Apache-2.0 |
-| Passport date | 2026-10-25 |
-| Audit status | No CRITICAL/HIGH CVEs; no HIGH code findings open (v2.2.1); MEDIUM and LOW code findings open |
-| Code review | Findings open, none HIGH (2026-10-25) |
+| Passport date | 2026-10-29 |
+| Audit status | No CRITICAL/HIGH CVEs; no HIGH code findings open (v2.3.0-2-gf47ac5e); MEDIUM and LOW code findings open |
+| Code review | Findings open, none HIGH (2026-10-29) |
 
 ## 2. Classification
 
@@ -31,8 +31,8 @@
 | Production data access | Read/write: MemoryCell resources and their status in the release namespace; read: all Secrets in the release namespace |
 | PII | User display name, hashed SSO identifier (SHA-256 prefix), voice transcripts, private user notes and session memories |
 | Sensitivity | Private per-user notes (`scope=private`), session tokens persisted in the system configuration cell status (HMAC-hashed, identity AES-GCM encrypted), OAuth client credentials, MCP bearer token |
-| Sign-in providers | GitHub OAuth (`--github-org` required, optional team), Microsoft Entra OAuth (`--azure-tenant-id` required), Google OAuth (`--google-domain` required, checked on the ID token `hd` claim); `--allow-any-user` admits every account of a provider |
-| MCP authentication | Static shared bearer secret (Secret named by `--mcp-token-secret`), or OAuth 2.1 with PKCE S256, dynamic client registration, EdDSA JWT access tokens (`--mcp-oauth`) |
+| Sign-in providers | GitHub OAuth (`--github-org` required, optional team), Microsoft Entra OAuth (`--azure-tenant-id` required), Google OAuth (`--google-domain` required, checked on the ID token `hd` claim; ID token `iss`, `aud`, `exp` and `email_verified` also checked; user id `google:<sub>`); `--allow-any-user` admits every account of a provider |
+| MCP authentication | Static shared bearer secret (Secret named by `--mcp-token-secret`), or OAuth 2.1 with PKCE S256, dynamic client registration, EdDSA JWT access tokens (`--mcp-oauth`); signing key and session HMAC key derived from the OAuth client secrets of the configured providers (GitHub, Entra, Google) |
 | MCP scopes | `xray:memory.read`, `xray:memory.write` |
 | Dev mode | `--dev` (chart value `dev`, default false): sign-in off, CORS any origin, built-in user `dev`; refused at startup together with a sign-in provider; warns when not listening on loopback |
 
@@ -50,6 +50,7 @@
 | Image pull policy | Always |
 | Image signing / attestation | None configured in the workflows |
 | CI | GitHub Actions (build.yml, release.yml), workflow permissions `contents: read` plus job-level overrides, actions pinned by major-version tag |
+| Go library packages | Module github.com/triageagent-dev/x-ray/v2: `pkg/memory`, `pkg/memstore`, `pkg/memstore/index`, `pkg/memstore/hub`, `pkg/memstore/cellsync`, `pkg/memstore/memtest`, `pkg/codegraph`, `pkg/xray`; private-item owner carried as a `user:<hash>` tag |
 | Snapshot format | gzip + gob, optionally wrapped in age (X25519 recipients, chunked ChaCha20-Poly1305) |
 
 ## 4. AI / LLM Supply Chain
@@ -111,12 +112,13 @@
 
 | Ecosystem | Manifest | Components (SBOM) | CRITICAL | HIGH | MEDIUM | LOW | UNKNOWN |
 |---|---|---|---|---|---|---|---|
-| Go | go.mod | 141 | 0 | 0 | 0 | 0 | 1 |
+| Go | go.mod | 141 | 0 | 0 | 0 | 0 | 3 |
 | npm | ui/package-lock.json | 203 | 0 | 0 | 0 | 0 | 0 |
-| Go (nested module) | adapters/adk/go.mod | 140 | 0 | 0 | 0 | 0 | 1 |
+| Go (nested module) | adapters/adk/go.mod | 140 | 0 | 0 | 0 | 0 | 3 |
 
 | Scan detail | Value |
 |---|---|
 | SBOM format | CycloneDX 1.6 (syft), `bin/sbom/` |
-| Scanner | trivy (vuln scanner), 2026-10-25 |
+| Scanner | trivy (vuln scanner), 2026-10-29 |
 | UNKNOWN entry | golang.org/x/crypto 0.58.0, GO-2026-5932 (openpgp package); no import of `golang.org/x/crypto/openpgp` in the repository's Go sources |
+| UNKNOWN entry | golang.org/x/net 0.61.0, CVE-2026-78661 and CVE-2026-97045 (html package; fixed in 0.62.0); `golang.org/x/net/html` is not in the compiled package set of either Go module |
