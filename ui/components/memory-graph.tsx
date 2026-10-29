@@ -97,9 +97,15 @@ interface Props {
   // Mobile passes true: a node tap shows the tooltip instead of opening a
   // detail panel/route (touch devices have no hover to preview with).
   tapShowsTooltip?: boolean
+  // Upper bound on drawn nodes across ALL categories, replacing the default
+  // per-category budget. Mobile passes MOBILE_GRAPH_NODES: every node is an SVG
+  // element with its own animation, which a phone cannot keep up with in the
+  // hundreds. Category labels still carry the true totals.
+  maxNodes?: number
 }
 
-export function MemoryGraph({ className, query, highlightIds, hitKinds, hitKey, extraItems, onSelect, showKindLabels = true, tapShowsTooltip = false }: Props) {
+export function MemoryGraph({ className, query, highlightIds, hitKinds, hitKey, extraItems, onSelect, showKindLabels = true, tapShowsTooltip = false, maxNodes }: Props) {
+  const nodeBudget = maxNodes ?? MAX_RENDER_NODES
   const router = useRouter()
   const svgRef = useRef<SVGSVGElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -453,7 +459,7 @@ export function MemoryGraph({ className, query, highlightIds, hitKinds, hitKey, 
     // one per category per pass. Every category with items keeps at least
     // one node, so every category can light up, while busy categories still
     // get proportionally more of the budget.
-    if (base.length <= MAX_RENDER_NODES) return base
+    if (base.length <= nodeBudget) return base
     const byCat = new Map<string, MemoryItemSummary[]>()
     for (const it of base) {
       const k = catKey(it)
@@ -466,18 +472,18 @@ export function MemoryGraph({ className, query, highlightIds, hitKinds, hitKey, 
       bucket.sort((a, b) => (b.hitCount ?? 0) - (a.hitCount ?? 0))
     }
     const budgeted: MemoryItemSummary[] = []
-    for (let round = 0; budgeted.length < MAX_RENDER_NODES; round++) {
+    for (let round = 0; budgeted.length < nodeBudget; round++) {
       let placed = false
       for (const bucket of buckets) {
         if (round >= bucket.length) continue
         budgeted.push(bucket[round])
         placed = true
-        if (budgeted.length >= MAX_RENDER_NODES) break
+        if (budgeted.length >= nodeBudget) break
       }
       if (!placed) break
     }
     return budgeted
-  }, [allItems, serverResults, query])
+  }, [allItems, serverResults, query, nodeBudget])
 
   useEffect(() => {
     const container = containerRef.current
@@ -652,7 +658,7 @@ export function MemoryGraph({ className, query, highlightIds, hitKinds, hitKey, 
         .attr("letter-spacing", "0.08em")
         .attr("fill", color).attr("fill-opacity", 0.55)
         .attr("pointer-events", "none")
-        .text(`${count} ${count === 1 ? "item" : "items"}`)
+        .text(showKindLabels ? `${count} ${count === 1 ? "item" : "items"}` : String(count))
     }
 
     // Synapses — faint lines between nodes that share at least one tag

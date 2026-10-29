@@ -132,6 +132,8 @@ const DEFAULT_TIER = 0.6
 // Pure UI constant — a display concern, so it lives in the frontend only (no
 // CRD, no server config, no endpoint). Change it by editing here and rebuilding.
 export const GRAPH_NODES_PER_KIND = 25
+// The mobile graph draws this many nodes in total, not per kind.
+export const MOBILE_GRAPH_NODES = 25
 
 // slugify turns a label into a stable, URL-safe category id (the /k/<id>
 // route segment). Mirrors the server-side derivation; kept here since the

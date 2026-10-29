@@ -182,6 +182,39 @@ describe("MemoryGraph render-budget fairness", () => {
 })
 
 /**
+ * The mobile graph (maxNodes) draws a fixed number of nodes in total, however
+ * many categories and items the store has, and its category labels are bare
+ * numbers carrying the true totals.
+ */
+describe("MemoryGraph maxNodes", () => {
+  it("draws at most maxNodes nodes across all kinds and labels kinds with totals only", async () => {
+    const kinds = ["active_concern", "stable_fact", "event", "operational_pattern"]
+    const all: MemoryItemSummary[] = kinds.flatMap(kind =>
+      Array.from({ length: 25 }, (_, i) => ({
+        id: `${kind}-${i}`, kind, scope: "shared", title: `${kind} ${i}`,
+        status: "active", updatedAt: "2026-07-30T00:00:00Z", hitCount: 0,
+      })))
+    fetchMemorySummaryMock.mockResolvedValueOnce({
+      items: all,
+      total: 400,
+      totalsByKind: { active_concern: 100, stable_fact: 100, event: 100, operational_pattern: 100 },
+    })
+
+    const { container } = render(<MemoryGraph maxNodes={25} showKindLabels={false} />)
+
+    await waitFor(() => {
+      expect(container.querySelectorAll("[data-dot-id]").length).toBeGreaterThan(0)
+    }, { timeout: 5000 })
+
+    expect(container.querySelectorAll("[data-dot-id]").length).toBe(25)
+    const labels = Array.from(container.querySelectorAll("[data-label-category-id] text")).map(t => t.textContent)
+    expect(labels.length).toBeGreaterThan(0)
+    for (const l of labels) expect(l).toMatch(/^\d+$/)
+    expect(labels).toContain("100")
+  })
+})
+
+/**
  * Region-flash regression test. Before the fix, a hit landing on an ID that
  * wasn't one of the bounded-preview's rendered nodes (the overwhelmingly
  * common case for `event`/`active_concern` hits — the graph draws only

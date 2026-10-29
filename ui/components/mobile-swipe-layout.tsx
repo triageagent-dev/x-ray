@@ -10,7 +10,7 @@ import { useAuth } from "@/hooks/use-auth"
 import { MemoryCard } from "@/components/memory-card"
 import { MemoryGraph } from "@/components/memory-graph"
 import { MobileItemOverlay } from "@/components/mobile-item-overlay"
-import { categoryById, categoryOf } from "@/lib/category-config"
+import { categoryById, categoryOf, MOBILE_GRAPH_NODES } from "@/lib/category-config"
 import { useCategories } from "@/hooks/use-categories"
 import { fetchUserNotes, subscribeMemoryEvents, hitKindMap, type MemoryItem, type MemoryItemSummary, api } from "@/lib/api"
 
@@ -267,6 +267,7 @@ function HomeSection({ onOpenItem, query }: { onOpenItem: (id: string, kind?: st
         tapShowsTooltip
         onSelect={(id, _x, _y, kind) => onOpenItem(id, kind)}
         showKindLabels={false}
+        maxNodes={MOBILE_GRAPH_NODES}
         className="absolute inset-0"
       />
     </div>
