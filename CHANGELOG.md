@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [2.4.2] - 2026-10-29
+
 ### Fixed
 - The mobile graph draws at most 25 nodes in total. The limit was 25 per kind, so a store with many kinds put up to 425 animated SVG nodes on a phone. The graph's regions now show only the total count per kind, as a bare number. The desktop graph is unchanged.
 
