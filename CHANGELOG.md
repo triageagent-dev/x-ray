@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [2.4.1] - 2026-10-29
+
 ### Fixed
 - A voice session now saves its episodic memory before it hangs up. The chart's prompt asked for one at the end of a session, but its goodbye rule and the `end_session` description only said to say goodbye and hang up, so the model skipped the save and the next session started with nothing to recall. Both now put `save_memory` (kind=episodic) first, then the goodbye, then `end_session`.
 - A voice session no longer crashes the server with `panic: concurrent write to websocket connection` when the model asks for several tools at once. The tool calls of a turn run in parallel and each wrote to the browser connection while the model's audio was being written; every write now goes through one lock.
