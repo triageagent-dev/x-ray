@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- A voice session no longer crashes the server with `panic: concurrent write to websocket connection` when the model asks for several tools at once. The tool calls of a turn run in parallel and each wrote to the browser connection while the model's audio was being written; every write now goes through one lock.
+
 ## [2.4.0] - 2026-10-29
 
 ### Added

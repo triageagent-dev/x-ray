@@ -494,6 +494,7 @@ type VoiceSession struct {
 	greeting      string
 	memory        *MemoryStore
 	browser       *websocket.Conn
+	writeMu       sync.Mutex // a websocket takes one writer at a time; every write goes through send
 	live          *genai.Session
 	tools         []voiceToolDef
 	logger        zerolog.Logger
@@ -745,7 +746,7 @@ func (s *VoiceSession) run(ctx context.Context) {
 		for _, c := range s.mcpClients {
 			c.Close() //nolint:errcheck
 		}
-		s.browser.WriteJSON(VoiceServerMessage{Done: true}) //nolint:errcheck
+		s.send(VoiceServerMessage{Done: true}) //nolint:errcheck
 		close(s.done)
 	}()
 
@@ -880,7 +881,7 @@ func (s *VoiceSession) handleGeminiMessage(ctx context.Context, msg *genai.LiveS
 		sc := msg.ServerContent
 
 		if sc.Interrupted {
-			if err := s.browser.WriteJSON(VoiceServerMessage{Interrupt: true}); err != nil {
+			if err := s.send(VoiceServerMessage{Interrupt: true}); err != nil {
 				return fmt.Errorf("write interrupt: %w", err)
 			}
 		}
@@ -909,7 +910,7 @@ func (s *VoiceSession) handleGeminiMessage(ctx context.Context, msg *genai.LiveS
 						s.turnStartTime = time.Now()
 					}
 					s.turnMu.Unlock()
-					if err := s.browser.WriteJSON(VoiceServerMessage{Audio: part.InlineData.Data}); err != nil {
+					if err := s.send(VoiceServerMessage{Audio: part.InlineData.Data}); err != nil {
 						return fmt.Errorf("write audio: %w", err)
 					}
 				}
@@ -924,7 +925,7 @@ func (s *VoiceSession) handleGeminiMessage(ctx context.Context, msg *genai.LiveS
 			}
 			s.turnOutput.WriteString(sc.OutputTranscription.Text)
 			s.turnMu.Unlock()
-			if err := s.browser.WriteJSON(VoiceServerMessage{Transcript: sc.OutputTranscription.Text}); err != nil {
+			if err := s.send(VoiceServerMessage{Transcript: sc.OutputTranscription.Text}); err != nil {
 				return fmt.Errorf("write transcript: %w", err)
 			}
 		}
@@ -939,7 +940,7 @@ func (s *VoiceSession) handleGeminiMessage(ctx context.Context, msg *genai.LiveS
 			s.turnMu.Lock()
 			s.turnInput.WriteString(sc.InputTranscription.Text)
 			s.turnMu.Unlock()
-			if err := s.browser.WriteJSON(VoiceServerMessage{InputTranscript: sc.InputTranscription.Text}); err != nil {
+			if err := s.send(VoiceServerMessage{InputTranscript: sc.InputTranscription.Text}); err != nil {
 				return fmt.Errorf("write input transcript: %w", err)
 			}
 		}
@@ -1014,7 +1015,7 @@ func (s *VoiceSession) pushQuota() {
 	if q.Breakdown == nil && !limited {
 		return // nothing to report yet
 	}
-	_ = s.browser.WriteJSON(VoiceServerMessage{Quota: q})
+	_ = s.send(VoiceServerMessage{Quota: q})
 
 	if !limited {
 		return
@@ -1293,6 +1294,15 @@ func (s *VoiceSession) isRepeatedCodeCall(name string, args map[string]any) bool
 	return s.codeCalls[key] > 1
 }
 
+// send writes one message to the browser. The tool calls of a turn run in their
+// own goroutines next to the reader of the model's output, and gorilla/websocket
+// panics on concurrent writers, so every write holds writeMu.
+func (s *VoiceSession) send(msg VoiceServerMessage) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return s.browser.WriteJSON(msg)
+}
+
 func (s *VoiceSession) handleToolCall(ctx context.Context, tc *genai.LiveServerToolCall) error {
 	type result struct {
 		idx  int
@@ -1309,7 +1319,7 @@ func (s *VoiceSession) handleToolCall(ctx context.Context, tc *genai.LiveServerT
 		go func() {
 			defer wg.Done()
 			s.logger.Debug().Str("tool", fc.Name).Any("args", fc.Args).Msg("tool call")
-			_ = s.browser.WriteJSON(VoiceServerMessage{ToolCall: fc.Name})
+			_ = s.send(VoiceServerMessage{ToolCall: fc.Name})
 
 			toolStart := time.Now()
 			var resultStr string
@@ -1345,7 +1355,7 @@ func (s *VoiceSession) handleToolCall(ctx context.Context, tc *genai.LiveServerT
 				Int("resultBytes", len(resultStr)).
 				Str("result", preview).
 				Msg("tool result")
-			_ = s.browser.WriteJSON(VoiceServerMessage{ToolResult: resultStr})
+			_ = s.send(VoiceServerMessage{ToolResult: resultStr})
 
 			results[i] = result{
 				idx: i,

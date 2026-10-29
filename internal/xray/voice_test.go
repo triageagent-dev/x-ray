@@ -3,10 +3,14 @@ package xray
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
+	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -536,4 +540,41 @@ func TestVoiceSession_IsRepeatedCodeCall(t *testing.T) {
 	assert.False(t, s.isRepeatedCodeCall("search_graph", a))
 	assert.False(t, s.isRepeatedCodeCall("search_memory", a))
 	assert.False(t, s.isRepeatedCodeCall("search_memory", a), "memory can change, never blocked")
+}
+
+// The tool calls of one turn run in parallel and each reports to the browser while
+// the model's audio is still streaming; gorilla/websocket panics on a second
+// concurrent writer, which took the server down.
+func TestVoiceSession_SendIsSafeConcurrently(t *testing.T) {
+	up := websocket.Upgrader{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		for {
+			if _, _, err := c.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer srv.Close()
+
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	require.NoError(t, err)
+	defer conn.Close()
+	s := &VoiceSession{browser: conn}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				assert.NoError(t, s.send(VoiceServerMessage{ToolCall: "search_memory"}))
+			}
+		}()
+	}
+	wg.Wait()
 }
