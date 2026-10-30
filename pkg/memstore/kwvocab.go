@@ -99,11 +99,11 @@ func (vi *vocabIndex) compact() {
 	vi.Mu.Lock()
 	defer vi.Mu.Unlock()
 	for _, p := range vi.wordPostings {
-		p.ids = slices.Clip(p.ids)
+		p.ids = shrunk(p.ids)
 	}
 	for _, bucket := range vi.joinsByLen {
 		for _, p := range bucket {
-			p.ids = slices.Clip(p.ids)
+			p.ids = shrunk(p.ids)
 		}
 	}
 }

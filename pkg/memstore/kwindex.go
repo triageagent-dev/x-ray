@@ -270,6 +270,26 @@ func (idx *trigramIndex) Index(id, title, content string) {
 	idx.wordOffsets[itemIdx] = offsets
 }
 
+// shrunk returns list re-allocated to its length when it carries spare
+// capacity (slices.Clip would only hide the slack, not free it).
+func shrunk[E any](list []E) []E {
+	if cap(list) == len(list) {
+		return list
+	}
+	return slices.Clone(list)
+}
+
+// compact drops the capacity slack the posting lists collected while they
+// grew by insertion (slices.Insert grows like append, up to twice the length).
+// A bulk build (Restore) calls it once at the end.
+func (idx *trigramIndex) compact() {
+	idx.Mu.Lock()
+	defer idx.Mu.Unlock()
+	for gid, list := range idx.gramPosting {
+		idx.gramPosting[gid] = shrunk(list)
+	}
+}
+
 // remove deletes an item from the index.
 func (idx *trigramIndex) Remove(id string) {
 	idx.Mu.Lock()
