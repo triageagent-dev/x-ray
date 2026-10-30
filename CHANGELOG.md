@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Fixed
+- The server sets the Go memory limit to 80% of the container's memory limit at start (cgroup v2, then v1) unless `GOMEMLIMIT` is set. Without one the collector waits for the heap to double, which in a 256Mi pod can be past the limit, so the pod was killed before a collection ran.
+- The tree-sitter parsers a code-graph parse, update or re-index creates are freed when it is done. They were never closed, so every one leaked a native parser per language it touched.
+- The GitHub and Azure sign-in responses are read up to 1 MiB, as the Google one already was.
+
+### Changed
+- A kind-filtered search of the cell index keeps only the best `topK` results instead of scoring every entry into a slice and sorting all of it: 690 KB and 5 allocations a search over 2,000 entries down to 8 KB.
+- Rebuilding the cell index's graph after a delete snapshots one embedding per id, not every entry.
+- The controller cache drops `managedFields` from the MemoryCells and Secrets it holds.
+
 ## [2.5.0] - 2026-10-30
 
 ### Changed
