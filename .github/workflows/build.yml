@@ -42,7 +42,7 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - uses: actions/setup-go@v6
+    - uses: actions/setup-go@v7
       with:
         go-version-file: "go.mod"
         cache: true
@@ -66,7 +66,7 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - uses: actions/setup-go@v6
+    - uses: actions/setup-go@v7
       with:
         go-version-file: "go.mod"
         cache: true
@@ -108,7 +108,7 @@ jobs:
       run: make ui-test
 
     # The export must build, embed and be served by the binary.
-    - uses: actions/setup-go@v6
+    - uses: actions/setup-go@v7
       with:
         go-version-file: "go.mod"
 
@@ -131,7 +131,7 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - uses: actions/setup-go@v6
+    - uses: actions/setup-go@v7
       with:
         go-version-file: "go.mod"
 
