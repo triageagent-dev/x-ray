@@ -14,6 +14,9 @@ func TestGoMemLimit(t *testing.T) {
 		{"", 0, false},
 		{"0", 0, false},
 		{"-1", 0, false},
+		{"1", 0, false},              // scales to zero
+		{"67108864", 0, false},       // 64Mi -> 51Mi, under the floor
+		{"83886080", 67108864, true}, // 80Mi -> exactly the floor
 	} {
 		got, ok := goMemLimit(c.in)
 		if got != c.want || ok != c.ok {

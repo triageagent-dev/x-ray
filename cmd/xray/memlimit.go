@@ -14,6 +14,11 @@ import (
 // count: goroutine stacks, cgo (tree-sitter) allocations and the runtime.
 const memLimitShare = 0.8
 
+// minGoMemLimit is the smallest limit worth setting: below it the collector
+// would run almost continuously, and a limit that scales to zero would be
+// read as "collect always".
+const minGoMemLimit = 64 << 20
+
 // cgroupMemoryFiles hold the container memory limit: cgroup v2, then v1.
 var cgroupMemoryFiles = []string{
 	"/sys/fs/cgroup/memory.max",
@@ -51,5 +56,9 @@ func goMemLimit(raw string) (int64, bool) {
 	if err != nil || n <= 0 || n >= 1<<60 {
 		return 0, false
 	}
-	return int64(float64(n) * memLimitShare), true
+	limit := int64(float64(n) * memLimitShare)
+	if limit < minGoMemLimit {
+		return 0, false
+	}
+	return limit, true
 }
