@@ -19,7 +19,7 @@ jobs:
     outputs:
       version: ${{ steps.ver.outputs.version }}
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
       with:
         fetch-depth: 0
 
@@ -74,7 +74,7 @@ jobs:
       IMAGE: ghcr.io/${{ github.repository_owner }}/xray
       CHART_OCI: oci://ghcr.io/${{ github.repository_owner }}/charts
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
     - name: Log in to GHCR
       uses: docker/login-action@v3
@@ -111,7 +111,7 @@ jobs:
     permissions:
       contents: write
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
     - name: Release notes from the changelog
       run: |
