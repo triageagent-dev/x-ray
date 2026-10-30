@@ -1,6 +1,7 @@
 package memstore
 
 import (
+	"slices"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -13,7 +14,7 @@ import (
 // Upsert, Mirror, Supersede, Restore, and
 // every delete/expire path.
 //
-// Two separate posting maps, not one, because matchesKWTokenFields/
+// Words and joins are kept apart, not merged, because matchesKWTokenFields/
 // fuzzyWordMatchFields apply DIFFERENT matching rules to a real word versus
 // an adjacent-word-pair join (see candidateIDsForToken's doc comment for the
 // full derivation) — collapsing them into one map would let a query token
@@ -22,33 +23,88 @@ import (
 type vocabIndex struct {
 	Mu sync.RWMutex
 
-	wordPostings map[string]map[string]struct{} // real lower-cased word -> item IDs
-	joinPostings map[string]map[string]struct{} // adjacent-pair join (word[i]+word[i+1], no space) -> item IDs
+	// ids/names intern item IDs to small integers so a posting list is a
+	// sorted []uint32 (4 bytes per posting) instead of a map[string]struct{}
+	// (a map header, bucket and 16-byte key per entry, which made every
+	// one-item word or join cost ~200 bytes of map). An id keeps its interned
+	// value for the life of the index, so names is bounded by the distinct ids
+	// ever indexed, like trigramIndex.itemNames.
+	ids   map[string]uint32
+	names []string
 
-	// wordsByLen/joinsByLen are bucket VIEWS of wordPostings/joinPostings,
-	// keyed by each entry's utf8.RuneCountInString, computed exactly once —
-	// in indexDedup, when the entry is first added to the vocabulary — never
-	// re-derived at query time. bucket[e] and postings[e] hold the SAME
-	// underlying map[string]struct{} value (Go maps are reference types), so
-	// there is no duplicated id-set data, only a second key path into it:
-	// candidateIDsForToken's fuzzy half walks only the length-banded
-	// buckets here instead of every entry in the flat postings map with a
+	wordPostings map[string]*posting // real lower-cased word -> items containing it
+
+	// joinPostings used to hold the adjacent-pair joins (word[i]+word[i+1], no
+	// space) the same way. Nothing ever looked a join up by value, only by
+	// length band, so the join posting lists live only in joinsByLen and a
+	// join costs one map slot instead of two.
+
+	// wordsByLen/joinsByLen are bucket VIEWS keyed by each entry's
+	// utf8.RuneCountInString, computed exactly once when the entry is first
+	// added to the vocabulary — never re-derived at query time. For words,
+	// bucket[e] and wordPostings[e] are the SAME *posting, so there is no
+	// duplicated id data, only a second key path into it:
+	// candidateIDsForToken's fuzzy half walks only the length-banded buckets
+	// here instead of every entry in the flat postings map with a
 	// RuneCountInString call on each.
-	wordsByLen map[int]map[string]map[string]struct{}
-	joinsByLen map[int]map[string]map[string]struct{}
+	wordsByLen map[int]map[string]*posting
+	joinsByLen map[int]map[string]*posting
 
 	byItemWords map[string][]string // item ID -> real words it currently contributes (for removal)
 	byItemJoins map[string][]string // item ID -> joins it currently contributes (for removal)
 }
 
+// posting is the sorted set of interned item ids that contribute one
+// vocabulary entry. It is shared by pointer between wordPostings and the
+// length buckets.
+type posting struct{ ids []uint32 }
+
+func (p *posting) add(id uint32) {
+	if i, found := slices.BinarySearch(p.ids, id); !found {
+		p.ids = slices.Insert(p.ids, i, id)
+	}
+}
+
+func (p *posting) remove(id uint32) {
+	if i, found := slices.BinarySearch(p.ids, id); found {
+		p.ids = slices.Delete(p.ids, i, i+1)
+	}
+}
+
 func newVocabIndex() *vocabIndex {
 	return &vocabIndex{
-		wordPostings: make(map[string]map[string]struct{}),
-		joinPostings: make(map[string]map[string]struct{}),
-		wordsByLen:   make(map[int]map[string]map[string]struct{}),
-		joinsByLen:   make(map[int]map[string]map[string]struct{}),
+		ids:          make(map[string]uint32),
+		wordPostings: make(map[string]*posting),
+		wordsByLen:   make(map[int]map[string]*posting),
+		joinsByLen:   make(map[int]map[string]*posting),
 		byItemWords:  make(map[string][]string),
 		byItemJoins:  make(map[string][]string),
+	}
+}
+
+// internLocked returns id's interned value, minting one on first sight.
+func (vi *vocabIndex) internLocked(id string) uint32 {
+	if n, ok := vi.ids[id]; ok {
+		return n
+	}
+	n := uint32(len(vi.names))
+	vi.ids[id] = n
+	vi.names = append(vi.names, id)
+	return n
+}
+
+// compact drops the capacity slack the posting lists collected while they
+// grew by insertion. A bulk build (Restore) calls it once at the end.
+func (vi *vocabIndex) compact() {
+	vi.Mu.Lock()
+	defer vi.Mu.Unlock()
+	for _, p := range vi.wordPostings {
+		p.ids = slices.Clip(p.ids)
+	}
+	for _, bucket := range vi.joinsByLen {
+		for _, p := range bucket {
+			p.ids = slices.Clip(p.ids)
+		}
 	}
 }
 
@@ -88,49 +144,62 @@ func (vi *vocabIndex) Index(id string, words, joins []string) {
 	defer vi.Mu.Unlock()
 	vi.removeLocked(id)
 
-	vi.byItemWords[id] = indexDedup(vi.wordPostings, vi.wordsByLen, id, words)
-	vi.byItemJoins[id] = indexDedup(vi.joinPostings, vi.joinsByLen, id, joins)
+	n := vi.internLocked(id)
+	vi.byItemWords[id] = indexDedup(vi.wordPostings, vi.wordsByLen, n, words)
+	vi.byItemJoins[id] = indexDedup(nil, vi.joinsByLen, n, joins)
 }
 
-// indexDedup dedupes entries (an item's own word/content lists can repeat
-// the same word many times), records id under each unique entry's posting
-// list in postings, and returns the deduped list for the caller's
-// byItem*[id] bookkeeping.
-//
-// The first time an entry is ever seen (postings has no set for it yet),
-// its rune length is computed once and the freshly-created posting-list map
-// is additionally filed into byLen[rlen][entry] — the SAME map value as
-// postings[entry], not a copy, so every later id added to (or removed from)
-// that entry's posting list via either map is visible through both. An
-// entry already present in postings (some other item already contributed
-// it) skips all of that: only its existing set gets id added.
-func indexDedup(postings map[string]map[string]struct{}, byLen map[int]map[string]map[string]struct{}, id string, entries []string) []string {
-	seen := make(map[string]struct{}, len(entries))
+// uniqueEntries returns entries without empties or repeats (an item's own
+// word/content lists can repeat the same word many times), in a slice sized
+// exactly to the result.
+func uniqueEntries(entries []string) []string {
 	uniq := make([]string, 0, len(entries))
 	for _, e := range entries {
-		if e == "" {
-			continue
+		if e != "" {
+			uniq = append(uniq, e)
 		}
-		if _, ok := seen[e]; ok {
-			continue
-		}
-		seen[e] = struct{}{}
-		uniq = append(uniq, e)
 	}
+	slices.Sort(uniq)
+	return slices.Clone(slices.Compact(uniq))
+}
+
+// postingFor returns e's posting list, from postings when the caller keeps
+// one (words) and from the length bucket otherwise (joins).
+func postingFor(postings map[string]*posting, byLen map[int]map[string]*posting, e string, rlen int) *posting {
+	if postings != nil {
+		return postings[e]
+	}
+	return byLen[rlen][e]
+}
+
+// indexDedup dedupes entries, records the interned item id n under each
+// unique entry's posting list, and returns the deduped list for the caller's
+// byItem*[id] bookkeeping.
+//
+// The first time an entry is ever seen, its rune length is computed once and
+// its freshly-created posting is filed into byLen[rlen][entry] — and into
+// postings[entry] when postings is non-nil — as the SAME *posting, so every
+// later id added to (or removed from) that entry via either path is visible
+// through both. An entry already present skips all of that: only its existing
+// posting gets the id added.
+func indexDedup(postings map[string]*posting, byLen map[int]map[string]*posting, n uint32, entries []string) []string {
+	uniq := uniqueEntries(entries)
 	for _, e := range uniq {
-		s, ok := postings[e]
-		if !ok {
-			s = make(map[string]struct{})
-			postings[e] = s
-			rlen := utf8.RuneCountInString(e)
+		rlen := utf8.RuneCountInString(e)
+		p := postingFor(postings, byLen, e, rlen)
+		if p == nil {
+			p = &posting{}
+			if postings != nil {
+				postings[e] = p
+			}
 			bucket, ok := byLen[rlen]
 			if !ok {
-				bucket = make(map[string]map[string]struct{})
+				bucket = make(map[string]*posting)
 				byLen[rlen] = bucket
 			}
-			bucket[e] = s
+			bucket[e] = p
 		}
-		s[id] = struct{}{}
+		p.add(n)
 	}
 	return uniq
 }
@@ -143,29 +212,33 @@ func (vi *vocabIndex) Remove(id string) {
 }
 
 func (vi *vocabIndex) removeLocked(id string) {
-	removeDedup(vi.wordPostings, vi.wordsByLen, id, vi.byItemWords[id])
-	removeDedup(vi.joinPostings, vi.joinsByLen, id, vi.byItemJoins[id])
+	if n, ok := vi.ids[id]; ok {
+		removeDedup(vi.wordPostings, vi.wordsByLen, n, vi.byItemWords[id])
+		removeDedup(nil, vi.joinsByLen, n, vi.byItemJoins[id])
+	}
 	delete(vi.byItemWords, id)
 	delete(vi.byItemJoins, id)
 }
 
-// removeDedup is indexDedup's inverse: for each entry id no longer
-// contributes, it is dropped from that entry's posting set, and if that was
+// removeDedup is indexDedup's inverse: for each entry the item no longer
+// contributes, its id is dropped from that entry's posting, and if that was
 // the last id (the entry has vanished from the vocabulary entirely), the
 // entry is deleted from postings AND from its byLen bucket — recomputing
 // the entry's rune length once, here, to find that bucket (this runs only
 // for the entries one item is losing, never for the whole vocabulary, so it
 // carries none of the per-query cost candidateIDsForToken used to pay).
-func removeDedup(postings map[string]map[string]struct{}, byLen map[int]map[string]map[string]struct{}, id string, entries []string) {
+func removeDedup(postings map[string]*posting, byLen map[int]map[string]*posting, n uint32, entries []string) {
 	for _, e := range entries {
-		s, ok := postings[e]
-		if !ok {
+		rlen := utf8.RuneCountInString(e)
+		p := postingFor(postings, byLen, e, rlen)
+		if p == nil {
 			continue
 		}
-		delete(s, id)
-		if len(s) == 0 {
-			delete(postings, e)
-			rlen := utf8.RuneCountInString(e)
+		p.remove(n)
+		if len(p.ids) == 0 {
+			if postings != nil {
+				delete(postings, e)
+			}
 			if bucket, ok := byLen[rlen]; ok {
 				delete(bucket, e)
 				if len(bucket) == 0 {
@@ -283,16 +356,20 @@ func (vi *vocabIndex) CandidateIDsForToken(t string) map[string]struct{} {
 	vi.Mu.RLock()
 	defer vi.Mu.RUnlock()
 
-	for word, ids := range vi.wordPostings {
+	add := func(p *posting) {
+		for _, n := range p.ids {
+			out[vi.names[n]] = struct{}{}
+		}
+	}
+
+	for word, p := range vi.wordPostings {
 		if len(word) < len(t) { // strings.Contains(word, t)'s own byte-length precondition — see doc comment
 			continue
 		}
 		if !strings.Contains(word, t) {
 			continue
 		}
-		for id := range ids {
-			out[id] = struct{}{}
-		}
+		add(p)
 	}
 
 	if tol > 0 { // fuzzyWordMatchFields' outer short-circuit — see (a) above
@@ -301,13 +378,11 @@ func (vi *vocabIndex) CandidateIDsForToken(t string) map[string]struct{} {
 			if !ok {
 				continue
 			}
-			for word, ids := range bucket {
+			for word, p := range bucket {
 				if !editDistanceWithin(t, word, tol) {
 					continue
 				}
-				for id := range ids {
-					out[id] = struct{}{}
-				}
+				add(p)
 			}
 		}
 
@@ -316,13 +391,11 @@ func (vi *vocabIndex) CandidateIDsForToken(t string) map[string]struct{} {
 			if absDiff(jn, tn) > jtol {
 				continue
 			}
-			for join, ids := range bucket {
+			for join, p := range bucket {
 				if !editDistanceWithin(t, join, jtol) {
 					continue
 				}
-				for id := range ids {
-					out[id] = struct{}{}
-				}
+				add(p)
 			}
 		}
 	}
@@ -341,7 +414,10 @@ func (vi *vocabIndex) CandidateIDsForToken(t string) map[string]struct{} {
 func (vi *vocabIndex) wordDocFreq(t string) int {
 	vi.Mu.RLock()
 	defer vi.Mu.RUnlock()
-	return len(vi.wordPostings[t])
+	if p := vi.wordPostings[t]; p != nil {
+		return len(p.ids)
+	}
+	return 0
 }
 
 // candidateIDsForTokens is the union of candidateIDsForToken across every
