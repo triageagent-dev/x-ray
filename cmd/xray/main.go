@@ -51,6 +51,8 @@ func init() {
 }
 
 func main() {
+	limitMemoryFromCgroup()
+
 	// Mode dispatch. `xray graph <sub>` runs the code graph (parse,
 	// snapshot, serve retrieval — see graph.go); bare `xray` runs the server:
 	// API, controller, voice and MCP. One binary, two modes.
