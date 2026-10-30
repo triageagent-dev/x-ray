@@ -156,7 +156,7 @@ func (a *azureAuth) exchangeCode(code string) (string, error) {
 		return "", err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return "", err
 	}
@@ -190,7 +190,7 @@ func (a *azureAuth) azureUserLogin(accessToken string) (string, string, error) {
 		return "", "", err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return "", "", err
 	}
