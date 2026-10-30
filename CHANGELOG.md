@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Security
+- **Every listener is plain TCP: `godebug multipathtcp=0` in the main module (CVE-2026-98432).** Go 1.24 and later ask the Linux kernel for a Multipath TCP socket on every `net.Listen`, and the kernel use-after-free in IPv4 TCP connection setup (CVE-2026-98432, CVSS 9.8, fixed in 5.10.272, 5.15.223, 6.1.190, 6.6.159, 6.12.113, 6.18.56) is reachable, as far as the published exploit goes, only through an MPTCP listener. No client of ours negotiates multipath, so the default is off at build time for every binary; a patched kernel stays the fix. The build is verified with `go version -m <binary>` showing `DefaultGODEBUG=multipathtcp=0`.
+
 ## [2.6.1] - 2026-10-30
 
 ### Fixed
