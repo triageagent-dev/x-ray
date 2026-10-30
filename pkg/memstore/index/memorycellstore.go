@@ -1,6 +1,7 @@
 package index
 
 import (
+	"container/heap"
 	"context"
 	"fmt"
 	"slices"
@@ -220,7 +221,14 @@ func scanEntriesByKind(embedding []float32, entries map[string]cellEntry, topK i
 // scanEntries is scanEntriesByKind with a document pre-filter: keep, when set,
 // decides before scoring whether an entry is a candidate.
 func scanEntries(embedding []float32, entries map[string]cellEntry, topK int, kind string, keep func(IndexEntry) bool) []CellSearchResult {
-	results := make([]CellSearchResult, 0, len(entries))
+	// With a topK only that many results are ever kept, in a min-heap, so a
+	// search over thousands of entries holds topK results instead of one per
+	// candidate.
+	capacity := len(entries)
+	if topK > 0 && topK < capacity {
+		capacity = topK
+	}
+	results := make(resultHeap, 0, capacity)
 	for _, entry := range entries {
 		if (kind != "" && entry.Cell.Kind != kind) || len(entry.Embedding) == 0 {
 			continue
@@ -229,13 +237,33 @@ func scanEntries(embedding []float32, entries map[string]cellEntry, topK int, ki
 			continue
 		}
 		dist := cellSurface.Surface.Distance(embedding, entry.Embedding)
-		results = append(results, CellSearchResult{Document: entry.Cell, Score: float32(1.0) - dist/2.0})
+		r := CellSearchResult{Document: entry.Cell, Score: float32(1.0) - dist/2.0}
+		switch {
+		case topK <= 0 || len(results) < topK:
+			heap.Push(&results, r)
+		case r.Score > results[0].Score:
+			results[0] = r
+			heap.Fix(&results, 0)
+		}
 	}
-	sort.Slice(results, func(i, j int) bool { return results[i].Score > results[j].Score })
-	if topK > 0 && len(results) > topK {
-		results = results[:topK]
-	}
-	return results
+	out := []CellSearchResult(results)
+	sort.Slice(out, func(i, j int) bool { return out[i].Score > out[j].Score })
+	return out
+}
+
+// resultHeap is a min-heap on Score: its root is the weakest result kept.
+type resultHeap []CellSearchResult
+
+func (h resultHeap) Len() int           { return len(h) }
+func (h resultHeap) Less(i, j int) bool { return h[i].Score < h[j].Score }
+func (h resultHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *resultHeap) Push(x any)        { *h = append(*h, x.(CellSearchResult)) }
+func (h *resultHeap) Pop() any {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[:n-1]
+	return x
 }
 
 // CellStore holds a per-subject HNSW index. Each subject's cells are
