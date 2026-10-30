@@ -37,6 +37,7 @@ func (p *Parser) parserFor(spec *langSpec, key string) (*tree_sitter.Parser, err
 	}
 	ts := tree_sitter.NewParser()
 	if err := ts.SetLanguage(spec.language()); err != nil {
+		ts.Close() // not stored in p.parsers, so Close would never reach it
 		return nil, fmt.Errorf("set language %s: %w", key, err)
 	}
 	p.parsers[key] = ts
