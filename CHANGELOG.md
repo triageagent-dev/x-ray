@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+- A kind-filtered search of the cell index no longer drops results when a cell has a zero-norm embedding. It scores NaN, and NaN at the root of the top-K heap was never displaced, so the search returned the first entries it visited instead of the best. This regressed in 2.6.0, from the top-K scan.
+- The server does not set a Go memory limit for a container under 80 MiB, where the scaled limit was zero or too small to run in.
+- A tree-sitter parser is closed when setting its language fails; it leaked before.
+
 ## [2.6.0] - 2026-10-30
 
 ### Added
