@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [2.6.2] - 2026-10-30
+
 ### Fixed
 - The ADK adapter module (`adapters/adk`) builds again: its go.mod and go.sum follow the root module they replace, after 2.6.0 and 2.6.1 moved the shared dependencies. `go mod tidy` only; no code change. The `adapters` CI job had failed on `main` with "updates to go.mod needed".
 
