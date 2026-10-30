@@ -39,6 +39,7 @@ func (ixr *Indexer) Update(ctx context.Context, paths []string) (changed, remove
 	defer ixr.mu.Unlock()
 
 	p := parser.New()
+	defer p.Close()
 	touched := false
 	var reindexed []string // paths actually changed/removed — see PublishChange below
 	for _, raw := range paths {

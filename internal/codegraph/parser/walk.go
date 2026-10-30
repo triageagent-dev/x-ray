@@ -18,6 +18,16 @@ func New() *Parser {
 	return &Parser{parsers: make(map[string]*tree_sitter.Parser)}
 }
 
+// Close releases the C memory behind every cached language parser; the
+// tree-sitter bindings do not free it when the Go value is collected. The
+// Parser is not usable afterwards.
+func (p *Parser) Close() {
+	for k, ts := range p.parsers {
+		ts.Close()
+		delete(p.parsers, k)
+	}
+}
+
 // parserFor returns a cached parser for the detected language key. The key is
 // the extension language (e.g. "tsx" vs "typescript") because those are distinct
 // grammars even though they share a tags query / spec.name.

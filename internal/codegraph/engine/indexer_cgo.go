@@ -49,6 +49,7 @@ func NewIndexer(ctx context.Context, repoSpecs []string, embedder index.Embedder
 func NewIndexerSeeded(ctx context.Context, repoSpecs []string, embedder index.Embedder, logger zerolog.Logger, followSymlinks bool, seed map[string][]float32, noEmbed bool) (*Indexer, error) {
 	ixr := &Indexer{logger: logger, followSymlinks: followSymlinks}
 	p := parser.New()
+	defer p.Close()
 
 	for _, spec := range repoSpecs {
 		spec = strings.TrimSpace(spec)
@@ -107,6 +108,7 @@ func (ixr *Indexer) Reindex(ctx context.Context) error {
 	ixr.mu.Lock()
 	defer ixr.mu.Unlock()
 	p := parser.New()
+	defer p.Close()
 	for _, rs := range ixr.repos {
 		rs.files = map[string]parser.Result{}
 		if _, _, _, _, err := parseRepoInto(p, rs.path, ixr.followSymlinks, rs); err != nil {

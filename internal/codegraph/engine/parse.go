@@ -120,6 +120,7 @@ func walkTree(root, dir string, followSymlinks bool, visited map[string]bool, fn
 // node/edge list. Shared by the CLI dump path and the live indexer.
 func ParseRepo(repo string, followSymlinks bool) (nodes []parser.NodeInfo, edges []parser.EdgeInfo, files int, langs map[string]int, err error) {
 	p := parser.New()
+	defer p.Close()
 	langs = map[string]int{}
 	err = FilepathWalk(repo, followSymlinks, func(rel string, src []byte) {
 		res := ParseOneFile(p, rel, src)

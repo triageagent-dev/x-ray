@@ -21,6 +21,9 @@ type Parser struct{}
 // New returns a no-op parser. It never allocates Tree-sitter resources.
 func New() *Parser { return &Parser{} }
 
+// Close is a no-op: this build holds no native parsers.
+func (p *Parser) Close() {}
+
 // ParseFile returns an empty Result in the CGO-free build: code parsing requires
 // the Tree-sitter runtime, which is unavailable here. The error is always nil so
 // callers treat the file as "no code nodes" and move on.
