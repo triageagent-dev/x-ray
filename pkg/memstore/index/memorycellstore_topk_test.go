@@ -61,3 +61,35 @@ func BenchmarkScanEntries_KindFilter(b *testing.B) {
 		_ = scanEntriesByKind(q, entries, 10, "k1")
 	}
 }
+
+// TestScanEntries_ZeroNormEmbeddingsDoNotTruncate: a zero vector scores NaN
+// against any query, and NaN must rank last, not stick at the heap root and
+// turn away every later candidate.
+func TestScanEntries_ZeroNormEmbeddingsDoNotTruncate(t *testing.T) {
+	entries := topKEntries(2000, 16)
+	good := map[string]cellEntry{}
+	for id, e := range entries {
+		good[id] = e
+	}
+	for i := 0; i < 50; i++ {
+		id := fmt.Sprintf("zero%02d", i)
+		entries[id] = cellEntry{Cell: IndexEntry{ID: id, Kind: "k0"}, Embedding: make([]float32, 16)}
+	}
+	q := make([]float32, 16)
+	for i := range q {
+		q[i] = float32(i%5) - 2
+	}
+	want := scanEntries(q, good, 10, "", nil)
+	for run := 0; run < 20; run++ { // map order differs per run
+		got := scanEntries(q, entries, 10, "", nil)
+		assert.Len(t, got, 10)
+		for i := range want {
+			assert.Equal(t, want[i].Document.ID, got[i].Document.ID, "rank %d", i)
+		}
+	}
+	// With fewer real candidates than topK the NaN ones still come back, last.
+	few := map[string]cellEntry{"a": good["c0001"], "z": entries["zero00"]}
+	out := scanEntries(q, few, 5, "", nil)
+	assert.Len(t, out, 2)
+	assert.Equal(t, "c0001", out[0].Document.ID)
+}

@@ -243,21 +243,32 @@ func scanEntries(embedding []float32, entries map[string]cellEntry, topK int, ki
 		switch {
 		case topK <= 0 || len(results) < topK:
 			heap.Push(&results, r)
-		case r.Score > results[0].Score:
+		case ranksAbove(r.Score, results[0].Score):
 			results[0] = r
 			heap.Fix(&results, 0)
 		}
 	}
 	out := []CellSearchResult(results)
-	sort.Slice(out, func(i, j int) bool { return out[i].Score > out[j].Score })
+	sort.Slice(out, func(i, j int) bool { return ranksAbove(out[i].Score, out[j].Score) })
 	return out
 }
 
-// resultHeap is a min-heap on Score: its root is the weakest result kept.
+// ranksAbove orders scores best first with NaN last. A zero-norm embedding
+// scores NaN (0/0 in the cosine), and every comparison with NaN is false, so
+// a NaN at the heap root would never be displaced and the scan would drop every
+// later candidate.
+func ranksAbove(a, b float32) bool {
+	if a != a {
+		return false
+	}
+	return b != b || a > b
+}
+
+// resultHeap is a min-heap on rank: its root is the weakest result kept.
 type resultHeap []CellSearchResult
 
 func (h resultHeap) Len() int           { return len(h) }
-func (h resultHeap) Less(i, j int) bool { return h[i].Score < h[j].Score }
+func (h resultHeap) Less(i, j int) bool { return ranksAbove(h[j].Score, h[i].Score) }
 func (h resultHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
 func (h *resultHeap) Push(x any)        { *h = append(*h, x.(CellSearchResult)) }
 func (h *resultHeap) Pop() any {
