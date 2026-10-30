@@ -120,22 +120,24 @@ func (s *subjectIndex) freshen() {
 		return
 	}
 	s.dirty = false
-	snapshot := make(map[string]cellEntry, len(s.entries))
+	// The snapshot keeps only what the build and the catch-up compare read, an
+	// embedding per id, not the whole entry (title, content, tags, ...).
+	snapshot := make(map[string][]float32, len(s.entries))
 	for id, e := range s.entries {
-		snapshot[id] = e
+		snapshot[id] = e.Embedding
 	}
 	s.mu.Unlock()
 
 	g := newGraph()
-	for id, e := range snapshot {
-		if len(e.Embedding) > 0 {
-			g.Insert(cellNodeEmbedding{Key: id, Vec: vector.F32(e.Embedding)})
+	for id, emb := range snapshot {
+		if len(emb) > 0 {
+			g.Insert(cellNodeEmbedding{Key: id, Vec: vector.F32(emb)})
 		}
 	}
 
 	s.mu.Lock()
 	for id, e := range s.entries {
-		if old, ok := snapshot[id]; ok && slices.Equal(old.Embedding, e.Embedding) {
+		if old, ok := snapshot[id]; ok && slices.Equal(old, e.Embedding) {
 			continue
 		}
 		if len(e.Embedding) > 0 {
