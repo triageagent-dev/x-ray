@@ -1,7 +1,9 @@
 package memstore
 
 import (
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -32,11 +34,11 @@ func TestLexicalCache_WordsCarryNoTrailingPunctuation(t *testing.T) {
 	it := Item{}
 	it.ID, it.Title, it.Content = "a", "Incident review.", "The bigquery, job: failed (twice)."
 	buildLexicalCache(&it)
-	assert.Equal(t, []string{"incident", "review"}, it.lex.titleLowerWT.words)
-	assert.Contains(t, it.lex.haystackLowerWT.words, "bigquery")
-	assert.Contains(t, it.lex.haystackLowerWT.words, "job")
-	assert.Contains(t, it.lex.haystackLowerWT.words, "twice")
-	assert.NotContains(t, it.lex.haystackLowerWT.words, "bigquery,")
+	assert.Equal(t, []string{"incident", "review"}, it.lex.titleLowerWT.Words())
+	assert.Contains(t, it.lex.haystackLowerWT.Words(), "bigquery")
+	assert.Contains(t, it.lex.haystackLowerWT.Words(), "job")
+	assert.Contains(t, it.lex.haystackLowerWT.Words(), "twice")
+	assert.NotContains(t, it.lex.haystackLowerWT.Words(), "bigquery,")
 }
 
 func TestVocabulary_DocumentFrequencyCountsAWordFollowedByPunctuation(t *testing.T) {
@@ -67,4 +69,28 @@ func TestTrigramIndex_IndexesWordsWithoutPunctuation(t *testing.T) {
 	assert.Equal(t, 1.0, idx.ItemScore("a", []string{"bigquery"}))
 	assert.Equal(t, 1.0, idx.ItemScore("a", []string{"review"}))
 	assert.Equal(t, []string{"a"}, idx.Search("bigquery job?"))
+}
+
+// TestLexWordTokens_MatchesLexFields proves the span representation yields the
+// words lexFields does, with the rune count of each.
+func TestLexWordTokens_MatchesLexFields(t *testing.T) {
+	for _, in := range []string{
+		"",
+		"   ",
+		"plain words here",
+		"  leading and trailing  ",
+		"snake_case-and.dotted;list,of:things!? `code` (paren) [br] {cu} <an> a|b/c\\d*e#f=g",
+		"Ünïcödé wörds 日本語 テスト mixed café",
+		"bad \xff\xfe bytes \xc3 here",
+		"one",
+		strings.Repeat("long", 5000) + " tail",
+	} {
+		want := lexFields(in)
+		got := lexWordTokens(in)
+		assert.Equal(t, len(want), got.Len(), "%q", in)
+		assert.Equal(t, want, append([]string{}, got.Words()...), "%q", in)
+		for i, w := range want {
+			assert.Equal(t, utf8.RuneCountInString(w), got.RuneLen(i), "%q word %d", in, i)
+		}
+	}
 }

@@ -39,14 +39,18 @@ func NormalizeQuery(q string) string {
 // query, the indexed text and the vocabulary, so a word is the same word on
 // both sides.
 func lexFields(s string) []string {
-	return strings.FieldsFunc(s, func(r rune) bool {
-		switch r {
-		case ' ', '\t', '\n', '\r', '_', '-', '.', ',', ';', ':', '!', '?', '"', '\'',
-			'`', '(', ')', '[', ']', '{', '}', '<', '>', '|', '/', '\\', '*', '#', '=':
-			return true
-		}
-		return false
-	})
+	return strings.FieldsFunc(s, isLexSep)
+}
+
+// isLexSep reports whether r separates lexical tokens — the split lexFields
+// and lexWordTokens share.
+func isLexSep(r rune) bool {
+	switch r {
+	case ' ', '\t', '\n', '\r', '_', '-', '.', ',', ';', ':', '!', '?', '"', '\'',
+		'`', '(', ')', '[', ']', '{', '}', '<', '>', '|', '/', '\\', '*', '#', '=':
+		return true
+	}
+	return false
 }
 
 // queryStopwords are tokens that carry no retrieval signal. A conversational
@@ -229,28 +233,88 @@ func editDistanceWithinRunes(a, b []rune, max int) bool {
 	return prev[lb] <= max
 }
 
-// wordTokens is a haystack's words (as strings.Fields would split it) paired
-// with each word's precomputed rune length. fuzzyWordMatchFields' length
-// banding (below) needs every word's rune count to compare against a query
-// token's; computing it via newWordTokens once per item at index time (see
-// lexicalCache/buildLexicalCache) means a query never re-derives it, instead
-// of utf8.RuneCountInString running once per (haystack word, query token)
-// pair on every single search the way it used to.
+// wordTokens is a haystack's words (as lexFields would split it) paired with
+// each word's precomputed rune length. fuzzyWordMatchFields' length banding
+// (below) needs every word's rune count to compare against a query token's;
+// computing it once per item at index time (see lexicalCache/
+// buildLexicalCache) means a query never re-derives it, instead of
+// utf8.RuneCountInString running once per (haystack word, query token) pair
+// on every single search the way it used to.
+//
+// The words are kept as spans into text, not as a []string plus a []int: a
+// string header is 16 bytes and an int 8, against 12 bytes per span, and
+// every word of every item is held four times over (lower-cased and
+// normalised, title and content). Word(i) is a substring of text, so reading
+// a word allocates nothing.
 type wordTokens struct {
-	words []string
-	lens  []int
+	text  string
+	spans []wordSpan
 }
 
-// newWordTokens builds a wordTokens from an already-split word list —
-// exactly what fuzzyWordMatchFields received directly before this cache
-// existed. Kept cheap enough to also serve as the on-the-fly fallback for an
-// item whose lexicalCache was never built (findFallback callers below).
-func newWordTokens(words []string) wordTokens {
-	lens := make([]int, len(words))
-	for i, w := range words {
-		lens[i] = utf8.RuneCountInString(w)
+// wordSpan locates one word in wordTokens.text and records its rune count.
+type wordSpan struct {
+	off, n, runes uint32
+}
+
+// Len is the number of words.
+func (w wordTokens) Len() int { return len(w.spans) }
+
+// Word is the i-th word.
+func (w wordTokens) Word(i int) string {
+	sp := w.spans[i]
+	return w.text[sp.off : sp.off+sp.n]
+}
+
+// RuneLen is the i-th word's rune count.
+func (w wordTokens) RuneLen(i int) int { return int(w.spans[i].runes) }
+
+// Words is the word list as a fresh slice.
+func (w wordTokens) Words() []string {
+	out := make([]string, len(w.spans))
+	for i := range out {
+		out[i] = w.Word(i)
 	}
-	return wordTokens{words: words, lens: lens}
+	return out
+}
+
+// lexWordTokens splits s exactly as lexFields does and records each word's
+// span and rune count, without building the intermediate []string.
+func lexWordTokens(s string) wordTokens {
+	var spans []wordSpan
+	start := -1
+	runes := uint32(0)
+	for i, r := range s {
+		if isLexSep(r) {
+			if start >= 0 {
+				spans = append(spans, wordSpan{uint32(start), uint32(i - start), runes})
+				start = -1
+			}
+			continue
+		}
+		if start < 0 {
+			start, runes = i, 0
+		}
+		runes++
+	}
+	if start >= 0 {
+		spans = append(spans, wordSpan{uint32(start), uint32(len(s) - start), runes})
+	}
+	return wordTokens{text: s, spans: shrunk(spans)}
+}
+
+// newWordTokens builds a wordTokens from an already-split word list. The words
+// need not be substrings of one string, so they are joined into a new one;
+// production code splits with lexWordTokens instead, which shares the source
+// text.
+func newWordTokens(words []string) wordTokens {
+	text := strings.Join(words, " ")
+	spans := make([]wordSpan, len(words))
+	off := 0
+	for i, w := range words {
+		spans[i] = wordSpan{uint32(off), uint32(len(w)), uint32(utf8.RuneCountInString(w))}
+		off += len(w) + 1
+	}
+	return wordTokens{text: text, spans: spans}
 }
 
 // matchesKWTokenFields returns true when a single token matches the
@@ -411,9 +475,10 @@ func fuzzyWordMatchFields(wt wordTokens, t string) bool {
 	if tol == 0 {
 		return false
 	}
-	words := wt.words
-	for i, word := range words {
-		wn := wt.lens[i]
+	n := wt.Len()
+	for i := 0; i < n; i++ {
+		word := wt.Word(i)
+		wn := wt.RuneLen(i)
 		// Levenshtein distance is at least the difference in length, so a word
 		// whose length gap already exceeds the tolerance can never match. The
 		// check is exact (no behaviour change) and skips the DP — which
@@ -428,12 +493,12 @@ func fuzzyWordMatchFields(wt wordTokens, t string) bool {
 		if absDiff(wn, tn) <= tol && editDistanceWithin(t, word, tol) {
 			return true
 		}
-		if i+1 < len(words) {
+		if i+1 < n {
 			// Adjacent-pair join catches "Foo BAR" → "FooBAR". Build the
 			// concatenation only when its length could possibly match.
-			jn := wn + wt.lens[i+1]
+			jn := wn + wt.RuneLen(i+1)
 			jtol := fuzzyTolerance(jn)
-			if absDiff(jn, tn) <= jtol && editDistanceWithin(t, word+words[i+1], jtol) {
+			if absDiff(jn, tn) <= jtol && editDistanceWithin(t, word+wt.Word(i+1), jtol) {
 				return true
 			}
 		}
@@ -592,13 +657,13 @@ func buildLexicalCacheText(item *Item, haystack string) {
 	item.lex = lexicalCache{
 		built:           true,
 		titleLower:      tl,
-		titleLowerWT:    newWordTokens(lexFields(tl)),
+		titleLowerWT:    lexWordTokens(tl),
 		haystackLower:   hl,
-		haystackLowerWT: newWordTokens(lexFields(hl)),
+		haystackLowerWT: lexWordTokens(hl),
 		titleNorm:       tn,
-		titleNormWT:     newWordTokens(lexFields(tn)),
+		titleNormWT:     lexWordTokens(tn),
 		haystackNorm:    hn,
-		haystackNormWT:  newWordTokens(lexFields(hn)),
+		haystackNormWT:  lexWordTokens(hn),
 	}
 }
 
@@ -615,7 +680,7 @@ func lowerFieldsFor(it Item) (nt string, ntf wordTokens, nc string, ncf wordToke
 	}
 	nt = strings.ToLower(it.Title)
 	nc = strings.ToLower(idHaystack(it))
-	return nt, newWordTokens(lexFields(nt)), nc, newWordTokens(lexFields(nc))
+	return nt, lexWordTokens(nt), nc, lexWordTokens(nc)
 }
 
 // normFieldsFor is lowerFieldsFor for lexScore's normalized (CamelCase-split,
@@ -627,7 +692,7 @@ func normFieldsFor(it Item) (nt string, ntf wordTokens, nc string, ncf wordToken
 	}
 	nt = NormalizeQuery(it.Title)
 	nc = NormalizeQuery(idHaystack(it))
-	return nt, newWordTokens(lexFields(nt)), nc, newWordTokens(lexFields(nc))
+	return nt, lexWordTokens(nt), nc, lexWordTokens(nc)
 }
 
 func rankAndLimit(q string, toks []string, cands []Item, idx *trigramIndex, trigramCands map[string]struct{}, weights map[string]float64, limit int) ([]Item, bool) {

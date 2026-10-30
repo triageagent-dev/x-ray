@@ -122,13 +122,18 @@ func (vi *vocabIndex) compact() {
 // candidates.
 func vocabWordsForItem(it Item) (words []string, joins []string) {
 	_, ntf, _, ncf := lowerFieldsFor(it)
-	words = make([]string, 0, len(ntf.words)+len(ncf.words))
-	words = append(words, ntf.words...)
-	words = append(words, ncf.words...)
+	words = make([]string, 0, ntf.Len()+ncf.Len())
+	appendWords := func(wt wordTokens) {
+		for i := 0; i < wt.Len(); i++ {
+			words = append(words, wt.Word(i))
+		}
+	}
+	appendWords(ntf)
+	appendWords(ncf)
 
 	appendJoins := func(wt wordTokens) {
-		for i := 0; i+1 < len(wt.words); i++ {
-			joins = append(joins, wt.words[i]+wt.words[i+1])
+		for i := 0; i+1 < wt.Len(); i++ {
+			joins = append(joins, wt.Word(i)+wt.Word(i+1))
 		}
 	}
 	appendJoins(ntf)
