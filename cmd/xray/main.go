@@ -336,6 +336,9 @@ func main() {
 			Scheme: sc,
 			Cache: cache.Options{
 				DefaultNamespaces: map[string]cache.Config{namespace: {}},
+				// managedFields are server-side-apply bookkeeping this process never
+				// reads, and a large share of each cached object.
+				DefaultTransform: cache.TransformStripManagedFields(),
 			},
 			// Disable built-in metrics and health servers — we run our own HTTP server.
 			Metrics:                metricsserver.Options{BindAddress: "0"},
