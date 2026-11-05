@@ -2,7 +2,10 @@ package index
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"sort"
 	"time"
 
@@ -176,18 +179,65 @@ func (s *CellStore) SetQueryEmbedCounter(fn func(hit bool)) {
 	}
 }
 
-// SeedOrEmbed makes sure a cell is in the index. A cell that carries an
-// embedding which decodes and has the index's dimension is seeded from it, and
-// nothing needs writing: the returned string is empty. A cell with none, or
-// with one that cannot be decoded or has the wrong dimension (it was embedded by
-// another model), is embedded now, and the returned string is the new embedding
-// for the caller to persist on the cell. doc is the cell's index entry.
+// FingerprintAnnotation is the MemoryCell annotation that records what the
+// cell's stored embedding (Spec.Embedding) was made from:
+// EmbeddingFingerprint of the cell's text and of that embedding. It is written
+// in the same update as the embedding, so the two never disagree. It is an
+// annotation, not a spec or status field, so that it needs no CRD schema
+// change: deployments run the chart's CRDs, which Helm installs but never
+// upgrades, and the API server prunes a field its schema does not know, so a
+// fingerprint kept in an unknown status field would vanish on every write and
+// the cell would be re-embedded forever.
+const FingerprintAnnotation = "xray.triageagent.dev/embedding-fingerprint"
+
+// EmbeddingFingerprint is the FingerprintAnnotation value for a cell whose
+// index entry is doc and whose stored embedding is embedding. It is the
+// lowercase hex SHA-256 of the embedder's model, its output dimension and the
+// exact text it is sent for doc (cut to 1800 bytes and to the embedder's input
+// cap), a dot, and the first 16 hex digits of the SHA-256 of embedding. The
+// first part changes with the text, model or dimension; the second binds the
+// annotation to the vector it was written with, so a vector that another writer
+// replaced without the annotation is not taken as current. It detects a
+// mismatch, it does not authenticate the writer.
+func (s *CellStore) EmbeddingFingerprint(doc IndexEntry, embedding string) string {
+	model := s.embedder.Model()
+	h := sha256.New()
+	// The model is length-prefixed and the dimension is digits, both closed by
+	// a NUL, and the text runs to the end: no model or text can make two
+	// different triples hash the same bytes.
+	fmt.Fprintf(h, "%d:%s\x00%d\x00", len(model), model, s.embedder.OutputDims())
+	_, _ = io.WriteString(h, s.embedder.inputText(cellEmbedText(doc)))
+	vec := sha256.Sum256([]byte(embedding))
+	return hex.EncodeToString(h.Sum(nil)) + "." + hex.EncodeToString(vec[:8])
+}
+
+// SeedOrEmbed makes sure a cell is in the index. A cell whose stored embedding
+// is current, that is its FingerprintAnnotation equals
+// EmbeddingFingerprint(doc, Spec.Embedding) and the embedding decodes to the
+// index's dimension, is seeded from it with no embedder call, and nothing needs
+// writing: the returned string is empty. Any other cell is embedded now: one
+// with no embedding, one whose text, model or dimension changed since it was
+// embedded, one embedded before the fingerprint existed (no annotation), one
+// whose embedding was replaced without its annotation, or one whose embedding
+// cannot be decoded or has the wrong dimension. The returned string is then the
+// new embedding, and the caller persists it on the cell together with
+// FingerprintAnnotation set to EmbeddingFingerprint(doc, embedded), in one
+// write; without the annotation the next sync embeds the cell again.
+//
+// When that embed fails and the cell carries a stored embedding that is not
+// current but decodes to the index's known dimension, the stored vector is
+// seeded so the cell stays searchable, and the error is returned: nothing is to
+// be written, and the caller retries. doc is the cell's index entry.
 func (s *CellStore) SeedOrEmbed(ctx context.Context, cell *memoryv1.MemoryCell, doc IndexEntry) (embedded string, err error) {
+	var stale []float32 // a stored vector of another text or origin, the fallback if the embed fails
 	if cell.Spec.Embedding != "" {
 		vec, derr := DecodeEmbedding(cell.Spec.Embedding)
 		switch {
 		case derr != nil:
 			s.logger.Warn().Err(derr).Str("cell", doc.ID).Msg("cell index: stored embedding cannot be decoded; re-embedding")
+		case cell.Annotations[FingerprintAnnotation] != s.EmbeddingFingerprint(doc, cell.Spec.Embedding):
+			s.logger.Debug().Str("cell", doc.ID).Msg("cell index: stored embedding was made from another text, model or dimension, or has no fingerprint; re-embedding")
+			stale = vec
 		case s.SeedFromEmbedding(doc, vec):
 			return "", nil
 		default:
@@ -196,6 +246,11 @@ func (s *CellStore) SeedOrEmbed(ctx context.Context, cell *memoryv1.MemoryCell, 
 	}
 	vec, err := s.Index(ctx, doc)
 	if err != nil {
+		// Only into a store whose dimension is known: a stale vector must not set
+		// it, or one from another model would lock the store to its shape.
+		if stale != nil && s.hasDim(len(stale)) && s.SeedFromEmbedding(doc, stale) {
+			return "", fmt.Errorf("%w (the stored embedding is seeded until the cell can be embedded)", err)
+		}
 		return "", err
 	}
 	return EncodeEmbedding(vec), nil

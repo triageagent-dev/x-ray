@@ -4,6 +4,7 @@ import (
 	"container/heap"
 	"context"
 	"fmt"
+	"math"
 	"slices"
 	"sort"
 	"strings"
@@ -137,7 +138,7 @@ func (s *subjectIndex) freshen() {
 
 	s.mu.Lock()
 	for id, e := range s.entries {
-		if old, ok := snapshot[id]; ok && slices.Equal(old, e.Embedding) {
+		if old, ok := snapshot[id]; ok && sameVector(old, e.Embedding) {
 			continue
 		}
 		if len(e.Embedding) > 0 {
@@ -151,14 +152,30 @@ func (s *subjectIndex) freshen() {
 
 func (s *subjectIndex) insert(doc IndexEntry, embedding []float32) {
 	s.mu.Lock()
-	// Re-seeding an unchanged cell (every reconcile does) must not dirty the
-	// graph; replacing an embedding leaves the old node behind, which does.
-	if old, ok := s.entries[doc.ID]; ok && !slices.Equal(old.Embedding, embedding) {
-		s.dirty = true
-	}
+	old, ok := s.entries[doc.ID]
 	s.entries[doc.ID] = cellEntry{Cell: doc, Embedding: embedding}
-	s.index.Insert(cellNodeEmbedding{Key: doc.ID, Vec: vector.F32(embedding)})
+	switch {
+	case ok && sameVector(old.Embedding, embedding):
+		// Re-seeding an unchanged cell (every reconcile does) refreshes the entry
+		// and leaves the graph alone. The graph has no key dedupe: it folds an
+		// equal vector into the node it finds, but a vector with no finite
+		// distance (zero norm) is never found, so each insert would add a node
+		// and nothing would mark the graph for a rebuild.
+	case ok:
+		// Replacing an embedding leaves the old node behind; the next read
+		// rebuilds it away.
+		s.dirty = true
+		s.index.Insert(cellNodeEmbedding{Key: doc.ID, Vec: vector.F32(embedding)})
+	default:
+		s.index.Insert(cellNodeEmbedding{Key: doc.ID, Vec: vector.F32(embedding)})
+	}
 	s.mu.Unlock()
+}
+
+// sameVector reports whether two vectors are the same bit for bit, so a vector
+// holding a NaN equals itself and its re-seed is not taken for a new vector.
+func sameVector(a, b []float32) bool {
+	return slices.EqualFunc(a, b, func(x, y float32) bool { return math.Float32bits(x) == math.Float32bits(y) })
 }
 
 // remove drops id from entries and reports whether it was there. The graph is
@@ -368,6 +385,13 @@ func (s *CellStore) checkDim(id string, vec []float32) bool {
 	return true
 }
 
+// hasDim reports whether the store dimension is known and is n.
+func (s *CellStore) hasDim(n int) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.dim != 0 && s.dim == n
+}
+
 // dimMismatch reports whether a query vector disagrees with the store
 // dimension. A store with nothing indexed never mismatches.
 func (s *CellStore) dimMismatch(vec []float32) bool {
@@ -469,7 +493,7 @@ func (s *CellStore) Index(ctx context.Context, doc IndexEntry) ([]float32, error
 	if !s.checkDim(doc.ID, embedding) {
 		return nil, fmt.Errorf("embed cell %s: dimension %d does not match index dimension", doc.ID, len(embedding))
 	}
-	s.getOrCreate(doc.Subject).insert(doc, embedding)
+	s.put(doc, embedding)
 	return embedding, nil
 }
 
@@ -488,8 +512,21 @@ func (s *CellStore) SeedFromEmbedding(doc IndexEntry, embedding []float32) bool 
 	if !s.checkDim(doc.ID, embedding) {
 		return false
 	}
-	s.getOrCreate(doc.Subject).insert(doc, embedding)
+	s.put(doc, embedding)
 	return true
+}
+
+// put inserts doc into its subject's index and takes it out of any other: a
+// cell whose subject changed would otherwise stay in its old subject's index
+// too, and a search across subjects would return it twice.
+func (s *CellStore) put(doc IndexEntry, embedding []float32) {
+	target := s.getOrCreate(doc.Subject)
+	for _, idx := range s.snapshotSubjects() {
+		if idx != target {
+			idx.remove(doc.ID)
+		}
+	}
+	target.insert(doc, embedding)
 }
 
 // Search returns the top-k results across every subject's index. An optional

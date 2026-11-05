@@ -10,7 +10,7 @@
 | [002](002-persistence-paths.md) | Persistence Paths — What Survives a Pod Restart | Implemented | — | — |
 | [003](003-voice-session-config.md) | Voice Session Configuration via system_configuration Cell | Implemented | — | — |
 | [004](004-mcp-server.md) | MCP Server — Tools, Auth, and Persistence | Implemented | — | — |
-| [005](005-cellsyncer.md) | CellSyncer — CR to Memory Sync | Implemented | — | — |
+| [005](005-cellsyncer.md) | CellSyncer — CR to Memory Sync | Implemented | — | `TestSeedAll_LoadsAStoredVectorWhoseFingerprintMatchesWithNoEmbedAndNoWrite`, `TestSeedAll_AStoredVectorWithoutAFingerprintIsReEmbeddedOnce`, `TestSeedAll_ConvergesWhenItRunsBesideTheFirstReconciles`, `TestReconcile_AnUnchangedIndexedCellWritesNothing`, `TestReconcile_ReEmbedsAStoredVectorWhoseTextChanged`, `TestPersist_ChangedTextDropsTheStoredEmbeddingAndItsFingerprint`, `TestSyncCell_APrivateCellLosesItsEmbeddingAndFingerprint`, `TestSyncCell_ASystemConfigurationCellLosesItsEmbeddingAndFingerprint`, `TestSyncCell_IndexesExactlyTheCellsMirrorCellKeepsSearchable`, `TestSyncCell_AVectorReplacedUnderItsAnnotationIsReEmbedded`, `TestSyncCell_AFailingEmbedderKeepsALegacyCellSearchableAndWritesNothing`, `TestDecide_IndexesEveryEmbeddableCellWhetherOrNotItWasIndexedBefore`, `TestDecide_NeverIndexesAnotherInstancesCell`, `TestDecide_IndexesOnlyActiveCells`, `TestDecide_IndexesACellUntilItsDeadlineAtTheGivenNow`, `TestSeedOrEmbed_AVectorReplacedUnderItsAnnotationIsReEmbedded`, `TestSeedOrEmbed_AFailedEmbedSeedsAStaleStoredVectorAndReportsTheError`, `TestEmbeddingFingerprint_FollowsTheTextTheModelTheDimensionAndTheVector` |
 | [006](006-runtime-vs-startup-config.md) | Runtime vs Startup Configuration | Implemented | — | — |
 | [007](007-otel-tracing-voice-sessions.md) | OpenTelemetry Tracing for Voice Sessions | Implemented | — | — |
 | [008](008-phoenix-session-tracing.md) | Phoenix Session Tracing for Voice Conversations | Implemented | — | — |
@@ -28,7 +28,7 @@
 | [020](020-associative-memory-architecture.md) | Associative Memory Architecture — In-Memory HNSW with Kubernetes-Native Persistence | Implemented | — | — |
 | 021 | *(removed — the reflection/knowledge loop is out of scope; X-Ray is the memory substrate only)* | — | — | — |
 | [022](022-github-oauth.md) | GitHub OAuth for Public Access (org-restricted) | Implemented | [github-oauth](../todo/github-oauth.md) | — |
-| [023](023-hnsw-lock-free-rebuild.md) | HNSW Lock-Free Graph Rebuild via Pointer Swap | Implemented | — | — |
+| [023](023-hnsw-lock-free-rebuild.md) | HNSW Lock-Free Graph Rebuild via Pointer Swap | Implemented | — | `TestReconcile_ReEmbedsAStoredVectorWhoseTextChanged`, `TestPersist_ChangedTextDropsTheStoredEmbeddingAndItsFingerprint`, `TestSeedOrEmbed_AStoredEmbeddingOfAnotherTextOrWithoutAFingerprintIsReEmbedded`, `TestSubjectIndex_ReSeedingAnUnchangedCellAddsNoGraphNode`, `TestSubjectIndex_ReSeedWithChangedFieldsAndTheSameVectorRefreshesTheEntryOnly`, `TestSubjectIndex_ANaNVectorReSeededAddsNoNodeAndNeedsNoRebuild`, `TestCellStore_ACellWhoseSubjectChangedLeavesItsOldSubject` |
 | [024](024-personal-recall-memory.md) | Personal Recall Memory (`kind=recall`) | Accepted | — | — |
 | [025](025-floating-pinnable-item-panel.md) | Floating Pinnable Item Panel | Implemented | [floating-panel-followup](../todo/floating-panel-followup.md) | — |
 | [026](026-user-context-persistence.md) | User Context Persistence: Pinned Panels & Agent Notes | Implemented | — | — |

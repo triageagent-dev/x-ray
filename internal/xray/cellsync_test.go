@@ -3,6 +3,7 @@ package xray
 import (
 	"context"
 	"encoding/base64"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -245,33 +246,41 @@ func TestSyncMapCell_SkipsUnchangedGob(t *testing.T) {
 
 // persistCounters tracks Update / status-Update calls on the underlying fake
 // client via an interceptor, so tests can assert Persist made NO write at all
-// — not just "the content still looks the same" after the fact.
+// — not just "the content still looks the same" after the fact. Atomic, for a
+// test that writes from several goroutines.
 type persistCounters struct {
-	updates       int
-	statusUpdates int
+	updates       atomic.Int64
+	statusUpdates atomic.Int64
 }
 
 // newTrackedCellSyncer builds a CellSyncer over a fake client instrumented to
 // count Update/status-Update calls.
 func newTrackedCellSyncer(t *testing.T) (*CellSyncer, *persistCounters) {
 	t.Helper()
+	tracked, counters := trackedClient(t, fake.NewClientBuilder())
+	return NewCellSyncer(tracked, NewMemoryStore(), zerolog.Nop()), counters
+}
+
+// trackedClient builds the fake client b describes, instrumented to count
+// Update/status-Update calls.
+func trackedClient(t *testing.T, b *fake.ClientBuilder) (client.Client, *persistCounters) {
+	t.Helper()
 	scheme := runtime.NewScheme()
 	require.NoError(t, mcell.AddToScheme(scheme))
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	fakeClient := b.WithScheme(scheme).Build()
 
 	counters := &persistCounters{}
 	tracked := interceptor.NewClient(fakeClient, interceptor.Funcs{
 		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
-			counters.updates++
+			counters.updates.Add(1)
 			return c.Update(ctx, obj, opts...)
 		},
 		SubResourceUpdate: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
-			counters.statusUpdates++
+			counters.statusUpdates.Add(1)
 			return c.SubResource(subResourceName).Update(ctx, obj, opts...)
 		},
 	})
-
-	return NewCellSyncer(tracked, NewMemoryStore(), zerolog.Nop()), counters
+	return tracked, counters
 }
 
 func TestPersist_UnchangedIsNoOp(t *testing.T) {
@@ -284,8 +293,8 @@ func TestPersist_UnchangedIsNoOp(t *testing.T) {
 		Tags: []string{"a", "b"},
 	}
 	require.NoError(t, syncer.Persist(ctx, it, "ns"))
-	require.Equal(t, 0, counters.updates, "create path uses Create, not Update")
-	require.Equal(t, 1, counters.statusUpdates, "create stamps the Indexed status once")
+	require.EqualValues(t, 0, counters.updates.Load(), "create path uses Create, not Update")
+	require.EqualValues(t, 1, counters.statusUpdates.Load(), "create stamps the Indexed status once")
 
 	name := cellResourceName(it.ID)
 	created := &mcell.MemoryCell{}
@@ -294,8 +303,8 @@ func TestPersist_UnchangedIsNoOp(t *testing.T) {
 	// Re-Persist the identical item — must be a full no-op: no Update call, no
 	// UpdatedAt stamp, no status update.
 	require.NoError(t, syncer.Persist(ctx, it, "ns"))
-	assert.Equal(t, 0, counters.updates, "unchanged re-Persist must not call Update")
-	assert.Equal(t, 1, counters.statusUpdates, "unchanged re-Persist must not touch status either")
+	assert.EqualValues(t, 0, counters.updates.Load(), "unchanged re-Persist must not call Update")
+	assert.EqualValues(t, 1, counters.statusUpdates.Load(), "unchanged re-Persist must not touch status either")
 
 	after := &mcell.MemoryCell{}
 	require.NoError(t, syncer.Get(ctx, k8stypes.NamespacedName{Namespace: "ns", Name: name}, after))
@@ -327,8 +336,8 @@ func TestPersist_ChangedFieldUpdatesAndStampsUpdatedAt(t *testing.T) {
 	changed := *it
 	changed.Content = "v2"
 	require.NoError(t, syncer.Persist(ctx, &changed, "ns"))
-	assert.Equal(t, 1, counters.updates, "changed content must call Update")
-	assert.Equal(t, 2, counters.statusUpdates)
+	assert.EqualValues(t, 1, counters.updates.Load(), "changed content must call Update")
+	assert.EqualValues(t, 2, counters.statusUpdates.Load())
 
 	after := &mcell.MemoryCell{}
 	require.NoError(t, syncer.Get(ctx, k8stypes.NamespacedName{Namespace: "ns", Name: name}, after))
@@ -359,12 +368,12 @@ func TestPersist_EmbeddingOnlyDiffIsStillNoOp(t *testing.T) {
 	require.NoError(t, syncer.Get(ctx, k8stypes.NamespacedName{Namespace: "ns", Name: name}, cell))
 	cell.Spec.Embedding = "AAAA-fake-vector"
 	require.NoError(t, syncer.Update(ctx, cell))
-	updatesAfterEmbed := counters.updates
+	updatesAfterEmbed := counters.updates.Load()
 
 	// Re-Persist the SAME logical item — the CR now differs only by Embedding,
 	// which must not be seen as a content change.
 	require.NoError(t, syncer.Persist(ctx, it, "ns"))
-	assert.Equal(t, updatesAfterEmbed, counters.updates,
+	assert.Equal(t, updatesAfterEmbed, counters.updates.Load(),
 		"embedding-only CR diff must not trigger an Update")
 
 	final := &mcell.MemoryCell{}

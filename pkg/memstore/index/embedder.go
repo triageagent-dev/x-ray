@@ -147,6 +147,14 @@ func (e *Embedder) OutputDims() int {
 	return e.outputDims
 }
 
+// inputText is the text the embedder sends for text: text cut to its input cap.
+func (e *Embedder) inputText(text string) string {
+	if e == nil || len(text) <= e.maxInputChars {
+		return text
+	}
+	return text[:e.maxInputChars]
+}
+
 // EmbedDocument returns the embedding vector for a document to be indexed.
 func (e *Embedder) EmbedDocument(ctx context.Context, text string) ([]float32, error) {
 	return e.embed(ctx, text, "RETRIEVAL_DOCUMENT")
@@ -254,7 +262,7 @@ func (e *Embedder) embed(ctx context.Context, text, taskType string) ([]float32,
 	if len(text) > e.maxInputChars {
 		e.logger.Warn().Int("orig_chars", len(text)).Int("cap", e.maxInputChars).
 			Str("text", truncate(text, 80)).Msg("embed input truncated to char cap (embedding quality reduced; raise the model context window or shorten the cell)")
-		text = text[:e.maxInputChars]
+		text = e.inputText(text)
 	}
 	cacheKey := taskType + "\x00" + text
 

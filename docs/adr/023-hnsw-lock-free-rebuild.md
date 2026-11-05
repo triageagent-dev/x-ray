@@ -76,3 +76,13 @@ Note: `BulkDelete` (batch remove + single rebuild) will be added when `Reflectio
 - Peak memory during rebuild: 2× single graph (~920 MB at 10k, ~2 MB at 42 nodes)
 - Ghost nodes on content update: eliminated when rebuild is triggered on delete/expire
 - Ghost nodes still possible for the one reconcile cycle between content change and embedding cache — accepted, same as current behaviour
+
+## Amendments
+
+### 2026-11-05 — A content change is re-embedded
+
+The "Update (content change)" trigger above now has its other half: the new embedding. A stored vector carries the fingerprint of the text it was made from (`xray.triageagent.dev/embedding-fingerprint`, see the ADR-005 amendment), so after a cell's text changes the next reconcile embeds the new text and caches the vector back to the CR with its fingerprint. Inserting a vector that replaces another marks the subject index dirty, and the next read rebuilds without the old node (the lazy rebuild of ADR-053). Before this, the stored vector was reused whatever the text, and the cell kept its old position in the graph until `spec.embedding` was removed by hand.
+
+Since every reconcile now seeds its cell, a re-seed of an unchanged vector refreshes the entry and adds no graph node: hnsw has no key dedupe and folds an equal vector only when its search finds it, which a zero-norm vector never is. Vectors are compared bit for bit, so one holding a NaN is the same vector on every re-seed and does not dirty the graph. A cell inserted under a new subject is removed from every other subject's index first, so a search across subjects returns it once.
+
+Tests: `TestReconcile_ReEmbedsAStoredVectorWhoseTextChanged`, `TestPersist_ChangedTextDropsTheStoredEmbeddingAndItsFingerprint`, `TestSeedOrEmbed_AStoredEmbeddingOfAnotherTextOrWithoutAFingerprintIsReEmbedded`, `TestSubjectIndex_ReSeedingAnUnchangedCellAddsNoGraphNode`, `TestSubjectIndex_ReSeedWithChangedFieldsAndTheSameVectorRefreshesTheEntryOnly`, `TestSubjectIndex_ANaNVectorReSeededAddsNoNodeAndNeedsNoRebuild`, `TestCellStore_ACellWhoseSubjectChangedLeavesItsOldSubject`.

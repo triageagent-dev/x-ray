@@ -81,7 +81,12 @@ and the follow-on controller-runtime migration.
 
 ## Pending
 
-- [ ] **#14 Strip stale embeddings from all `MemoryCell` CRs**
+- [x] **#14 Strip stale embeddings from all `MemoryCell` CRs**
+  Done 2026-11-05, no manual strip needed: a stored vector carries the fingerprint
+  of the text it was made from (`xray.triageagent.dev/embedding-fingerprint`, ADR-005
+  amendment), the server re-embeds a cell whose text changed, and re-embeds once every
+  cell stored before fingerprints. The steps below are kept as history.
+
   After deploying the content-embedding change, existing CRs hold title-only vectors
   that are now stale. Patch them to remove `spec.embedding` so the reconciler
   re-embeds with full content on next sync.

@@ -130,6 +130,7 @@ func (s *CellSyncer) SeedAll(ctx context.Context, namespace string) error {
 	for i := range list.Items {
 		cell := &list.Items[i]
 		hadEmbedding := cell.Spec.Embedding != ""
+		embedding, fingerprint := cell.Spec.Embedding, cell.Annotations[index.FingerprintAnnotation]
 		if err := s.syncCell(ctx, cell); err != nil {
 			s.logger.Warn().Err(err).Str("cell", cell.Name).Msg("seed failed")
 			skipped++
@@ -142,8 +143,8 @@ func (s *CellSyncer) SeedAll(ctx context.Context, namespace string) error {
 			// operational cell — not indexed, not counted
 		case isPrivateScope(cell.Spec.Scope):
 			seeded++ // private cell loaded into the store, no vector index
-		case hadEmbedding:
-			seeded++
+		case hadEmbedding && cell.Spec.Embedding == embedding && cell.Annotations[index.FingerprintAnnotation] == fingerprint:
+			seeded++ // the stored vector was current and went into the index as it is
 		default:
 			embedded++
 		}
@@ -243,6 +244,7 @@ func (s *CellSyncer) syncCellDecision(ctx context.Context, cell *mcell.MemoryCel
 	if cell.Spec.Kind == "system_configuration" {
 		if cell.Spec.Embedding != "" {
 			cell.Spec.Embedding = ""
+			delete(cell.Annotations, index.FingerprintAnnotation)
 			if err := s.Update(ctx, cell); err != nil && !apierrors.IsConflict(err) {
 				s.logger.Warn().Err(err).Str("cell", cell.Name).Msg("clear stale embedding failed")
 			}
@@ -270,6 +272,7 @@ func (s *CellSyncer) syncCellDecision(ctx context.Context, cell *mcell.MemoryCel
 		s.memory.dropVector(cell.Spec.ID)
 		if cell.Spec.Embedding != "" || cell.Status.Indexed {
 			cell.Spec.Embedding = ""
+			delete(cell.Annotations, index.FingerprintAnnotation)
 			if err := s.Update(ctx, cell); err != nil && !apierrors.IsConflict(err) {
 				s.logger.Warn().Err(err).Str("cell", cell.Name).Msg("clear stale embedding failed")
 			}
@@ -289,7 +292,14 @@ func (s *CellSyncer) syncCellDecision(ctx context.Context, cell *mcell.MemoryCel
 		return d, s.markIndexed(ctx, cell)
 	}
 
-	embedded, err := s.memory.cells.SeedOrEmbed(ctx, cell, entryOfCell(cell))
+	// Every reconcile and every start seeds the cell: a stored embedding whose
+	// fingerprint matches the cell's text goes into the index as it is, with no
+	// embedder call and no write, so an unchanged cell costs nothing and starts no
+	// write loop. Anything else (no embedding, a changed text, an embedding from
+	// before fingerprints) is embedded, and the vector and its fingerprint are
+	// written back in one update so they cannot disagree.
+	doc := entryOfCell(cell)
+	embedded, err := s.memory.cells.SeedOrEmbed(ctx, cell, doc)
 	if err != nil {
 		return d, fmt.Errorf("embed cell %s: %w", cell.Name, err)
 	}
@@ -298,9 +308,10 @@ func (s *CellSyncer) syncCellDecision(ctx context.Context, cell *mcell.MemoryCel
 	}
 
 	cell.Spec.Embedding = embedded
-	cell.Status.Indexed = true
-	now := metav1.Now()
-	cell.Status.LastIndexedAt = &now
+	if cell.Annotations == nil {
+		cell.Annotations = map[string]string{}
+	}
+	cell.Annotations[index.FingerprintAnnotation] = s.memory.cells.EmbeddingFingerprint(doc, embedded)
 
 	if err := s.Update(ctx, cell); err != nil {
 		if apierrors.IsConflict(err) {
@@ -308,6 +319,11 @@ func (s *CellSyncer) syncCellDecision(ctx context.Context, cell *mcell.MemoryCel
 		}
 		return d, fmt.Errorf("patch cell embedding: %w", err)
 	}
+	// Set after the update: an update of the cell returns the stored status,
+	// which the status subresource keeps apart from the spec.
+	cell.Status.Indexed = true
+	now := metav1.Now()
+	cell.Status.LastIndexedAt = &now
 	if err := s.Status().Update(ctx, cell); err != nil && !apierrors.IsConflict(err) {
 		s.logger.Warn().Err(err).Str("cell", cell.Name).Msg("status update failed")
 	}
@@ -471,7 +487,8 @@ func (s *CellSyncer) markIndexed(ctx context.Context, cell *mcell.MemoryCell) er
 }
 
 // Persist writes a MemoryItem to the cluster as an MemoryCell CR.
-// Preserves any existing embedding so the reconciler won't re-embed unnecessarily.
+// Preserves an existing embedding while it still stands for the cell's text, so
+// the reconciler won't re-embed unnecessarily.
 func (s *CellSyncer) Persist(ctx context.Context, it *MemoryItem, namespace string) error {
 	name := cellResourceName(it.ID)
 	now := metav1.Now()
@@ -537,10 +554,19 @@ func (s *CellSyncer) Persist(ctx context.Context, it *MemoryItem, namespace stri
 		return nil
 	}
 
-	existingEmbedding := existing.Spec.Embedding
 	desired.CreatedAt = existing.Spec.CreatedAt
 	desired.UpdatedAt = now
-	desired.Embedding = existingEmbedding
+	desired.Embedding = existing.Spec.Embedding
+	// The stored embedding is carried forward only while its fingerprint
+	// matches the new text (a change of tags, confidence or links keeps it). A
+	// changed text drops the embedding and its fingerprint together, so the
+	// reconciler embeds the new text. Keyword-only mode has no fingerprint to
+	// compare and keeps the embedding as before; the seed path still checks it.
+	if cells := s.memory.cells; cells != nil && desired.Embedding != "" &&
+		existing.Annotations[index.FingerprintAnnotation] != cells.EmbeddingFingerprint(entryOfCell(&mcell.MemoryCell{Spec: desired}), desired.Embedding) {
+		desired.Embedding = ""
+		delete(existing.Annotations, index.FingerprintAnnotation)
+	}
 	existing.Spec = desired
 	if err := s.Update(ctx, existing); err != nil {
 		return err
