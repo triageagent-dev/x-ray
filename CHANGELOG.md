@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [2.7.0] - 2026-11-06
+
 ### Fixed
 - **Cells whose vectors are stored on the cell are found by meaning again after a restart.** Since 2.3.0 the server left a cell out of the vector index when it already carried its embedding and an indexed status. The vector index lives in the process, so after every restart semantic search missed exactly the cells whose vectors had been stored, and found only those embedded since the start. Every public cell is now loaded at start and on every reconcile, from its stored vector, with no embedding call and, once the cell is marked indexed, no write to the cluster. Seeding an unchanged cell again adds nothing to the index, and a cell whose subject changed leaves its old place, so a cell never shows up twice in search results or makes the index grow.
 - **A changed text is embedded again.** A cell kept the vector of its old text after its title or content changed (a GitOps apply, an MCP or voice upsert), so semantic search kept answering for the old text until someone removed `spec.embedding` by hand. A stored vector now carries the annotation `xray.triageagent.dev/embedding-fingerprint`, a SHA-256 of the embedding model, its dimension and the text sent to it, and a short hash of the vector itself, written in the same update as the vector. A cell whose text, model, dimension or vector no longer matches is embedded again, and an upsert that changes the text drops the old vector. While the embedder is down, such a cell stays searchable by the vector it carries and is embedded when the embedder answers. No CRD change.
