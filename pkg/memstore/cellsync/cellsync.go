@@ -53,12 +53,23 @@ type Decision struct {
 	// zero. It is set on every path that does not delete, so a deadline is never
 	// missed because the cell took an early return.
 	Requeue time.Duration
-	// Index: embed the cell, or seed the vector index from the embedding it
-	// carries (index.CellStore.SeedOrEmbed).
+	// Index: the cell belongs in the vector index. Seed it from the embedding it
+	// carries when that embedding is current, or embed it
+	// (index.CellStore.SeedOrEmbed). It is set for every public cell this
+	// instance owns whose item is active (an empty or "indexed" status reads as
+	// active, as a mirror of the cell reads it), unless it is a config or
+	// never-embed cell, whether or not the cell carries an embedding or an
+	// indexed status: the vector index lives in the process, so a restart or a
+	// changed text needs the cell again, and seeding a cell whose embedding is
+	// current writes nothing. A cell of another instance is never indexed, so
+	// two controllers never write each other's embeddings; a retired or
+	// otherwise inactive cell is never indexed, since a mirror drops it from the
+	// vector index.
 	Index bool
 	// ClearEmbedding: a private cell holds an embedding or an indexed status.
-	// Remove it from the vector index, clear Spec.Embedding and Status.Indexed,
-	// so a flip back to public re-embeds fresh.
+	// Remove it from the vector index, clear Spec.Embedding, its
+	// index.FingerprintAnnotation and Status.Indexed, so a flip back to public
+	// re-embeds fresh.
 	ClearEmbedding bool
 }
 
@@ -96,8 +107,17 @@ func Decide(cell *memoryv1.MemoryCell, now time.Time, o Options) Decision {
 	if o.NeverEmbed != nil && o.NeverEmbed(cell) {
 		return d
 	}
-	d.Index = !(cell.Spec.Embedding != "" && cell.Status.Indexed)
+	d.Index = owned && !expired && activeStatus(cell.Spec.Status)
 	return d
+}
+
+// activeStatus reports whether a cell's status is active, reading an empty
+// status or the in-process status "indexed" as active, the way a host's mirror
+// of the cell reads it. With "not expired", checked by Decide at its own now,
+// it is memstore.Item.IsActive: a mirror drops an inactive item from the vector
+// index, so seeding one would put it back on every reconcile.
+func activeStatus(status string) bool {
+	return status == "" || status == "active" || status == "indexed"
 }
 
 // ShouldSeed is the per-cell gate of a startup bulk seed of the vector index. It

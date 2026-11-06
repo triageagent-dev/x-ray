@@ -61,8 +61,9 @@ func TestDecide_KeepRetiredLeavesARetiredCellAndStillDeletesAtTheDeadline(t *tes
 	o := opts()
 	o.KeepRetired = true
 	for _, status := range []string{"stale", "superseded"} {
-		d := Decide(cell(func(c *memoryv1.MemoryCell) { c.Spec.Status = status }), now, o)
+		d := Decide(cell(func(c *memoryv1.MemoryCell) { c.Spec.Status = status; c.Spec.Embedding = "v"; c.Status.Indexed = true }), now, o)
 		assert.False(t, d.Delete, status)
+		assert.False(t, d.Index, "a kept retired cell stays out of the vector index: "+status)
 	}
 	d := Decide(cell(func(c *memoryv1.MemoryCell) { c.Spec.Status = "stale"; c.Spec.StaleAfter = at(-time.Minute) }), now, o)
 	assert.True(t, d.Delete, "a deadline that has passed still deletes")
@@ -95,11 +96,48 @@ func TestDecide_ArmsARequeueAtTheDeadlineOnEveryPath(t *testing.T) {
 	assert.Zero(t, Decide(cell(func(c *memoryv1.MemoryCell) { c.Spec.StaleAfter = at(-time.Second); c.Spec.Subject = "other" }), now, opts()).Requeue, "a deadline already past arms nothing")
 }
 
-func TestDecide_IndexesOnlyWhatNeedsIt(t *testing.T) {
+func TestDecide_IndexesEveryEmbeddableCellWhetherOrNotItWasIndexedBefore(t *testing.T) {
 	assert.True(t, Decide(cell(nil), now, opts()).Index, "a cell with no embedding is embedded")
 	assert.True(t, Decide(cell(func(c *memoryv1.MemoryCell) { c.Spec.Embedding = "v" }), now, opts()).Index, "a persisted embedding not yet seeded is seeded")
-	assert.False(t, Decide(cell(func(c *memoryv1.MemoryCell) { c.Spec.Embedding = "v"; c.Status.Indexed = true }), now, opts()).Index, "already indexed")
+	assert.True(t, Decide(cell(func(c *memoryv1.MemoryCell) { c.Spec.Embedding = "v"; c.Status.Indexed = true }), now, opts()).Index,
+		"an indexed cell is seeded again: the vector index lives in the process and a restart empties it")
 	assert.False(t, Decide(cell(func(c *memoryv1.MemoryCell) { c.Labels = map[string]string{"embed": "none"} }), now, opts()).Index, "the host's never-embed cells")
+}
+
+func TestDecide_NeverIndexesAnotherInstancesCell(t *testing.T) {
+	o := Options{Subject: "me"}
+	for name, mut := range map[string]func(*memoryv1.MemoryCell){
+		"unembedded": func(c *memoryv1.MemoryCell) { c.Spec.Subject = "other" },
+		"embedded": func(c *memoryv1.MemoryCell) {
+			c.Spec.Subject = "other"
+			c.Spec.Embedding = "v"
+			c.Status.Indexed = true
+		},
+	} {
+		d := Decide(cell(mut), now, o)
+		assert.False(t, d.Index, "another instance's cell is neither embedded nor written: "+name)
+		assert.False(t, d.Delete, name)
+	}
+	assert.True(t, Decide(cell(func(c *memoryv1.MemoryCell) { c.Spec.Subject = "me" }), now, o).Index, "this instance's own cell is")
+}
+
+func TestDecide_IndexesOnlyActiveCells(t *testing.T) {
+	o := opts()
+	o.KeepRetired = true
+	for status, want := range map[string]bool{"": true, "active": true, "indexed": true, "draft": false, "stale": false, "superseded": false} {
+		d := Decide(cell(func(c *memoryv1.MemoryCell) { c.Spec.Status = status }), now, o)
+		assert.Equal(t, want, d.Index, "status %q", status)
+	}
+}
+
+func TestDecide_IndexesACellUntilItsDeadlineAtTheGivenNow(t *testing.T) {
+	before := Decide(cell(func(c *memoryv1.MemoryCell) { c.Spec.StaleAfter = at(time.Hour) }), now, opts())
+	assert.True(t, before.Index, "the deadline is after now: active")
+	assert.Equal(t, time.Hour, before.Requeue)
+
+	after := Decide(cell(func(c *memoryv1.MemoryCell) { c.Spec.StaleAfter = at(-time.Hour) }), now, opts())
+	assert.False(t, after.Index, "the deadline is before now: not indexed")
+	assert.True(t, after.Delete)
 }
 
 func TestDecide_APrivateCellIsNeverEmbeddedAndLosesAStoredEmbedding(t *testing.T) {
