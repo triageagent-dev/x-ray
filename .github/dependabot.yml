@@ -5,6 +5,10 @@ updates:
   - package-ecosystem: gomod
     directory: /
     schedule: {interval: weekly}
+    # mcp-go 1.x is a migration of its own, and the ADK adapter pins it too.
+    ignore:
+      - dependency-name: github.com/mark3labs/mcp-go
+        update-types: [version-update:semver-major]
     groups:
       go-minor-and-patch:
         update-types: [minor, patch]
@@ -23,6 +27,18 @@ updates:
       - dependency-name: "@types/react"
         update-types: [version-update:semver-major]
       - dependency-name: "@types/react-dom"
+        update-types: [version-update:semver-major]
+      # The UI builds on Node 22; its types stay on the 22 line.
+      - dependency-name: "@types/node"
+        update-types: [version-update:semver-major]
+      # tailwind-merge 3 targets Tailwind v4; the UI is on Tailwind 3.
+      - dependency-name: tailwind-merge
+        update-types: [version-update:semver-major]
+      # TypeScript 7 drops options tsconfig.json still sets (target ES5).
+      - dependency-name: typescript
+        update-types: [version-update:semver-major]
+      # vitest 5 needs a newer @types/node than the Node 22 line.
+      - dependency-name: vitest
         update-types: [version-update:semver-major]
     groups:
       react:
