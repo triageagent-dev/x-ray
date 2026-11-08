@@ -184,6 +184,7 @@ push: $(UI_DEP) ## Build and push xray image, web UI included
 	@VERSION=$(VERSION) GIT_COMMIT=$(GIT_COMMIT) BUILD_DATE=$(BUILD_DATE) \
 		KO_DOCKER_REPO=$(REGISTRY) ko build \
 		--tags=$(VERSION),latest \
+		--platform=linux/amd64,linux/arm64 \
 		--bare \
 		--image-label org.opencontainers.image.version=$(VERSION) \
 		--image-label org.opencontainers.image.revision=$(GIT_COMMIT) \

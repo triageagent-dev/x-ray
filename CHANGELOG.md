@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+- The released image is built for `linux/amd64` and `linux/arm64` (`make push` passes `--platform` to ko), so the chart runs on arm64 nodes.
+
 ## [2.7.0] - 2026-11-06
 
 ### Fixed
