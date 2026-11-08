@@ -41,7 +41,7 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Install ko
-      uses: ko-build/setup-ko@v0.7
+      uses: ko-build/setup-ko@v0.10
 
     - name: Compute VERSION
       id: ver
