@@ -1,6 +1,6 @@
 # TODO: Voice Session Longevity (GoAway, Resumption, Context Compression)
 
-**Status:** Open — ADR-039 (Accepted)
+**Status:** Open — ADR-039 (Accepted); Phases 1 and 2 done 2026-11-09 (see ADR-039 "As built: capabilities 1 and 2")
 
 Implements [ADR-039](../adr/039-voice-session-longevity.md). Three independent,
 flag-gated capabilities so Gemini Live voice sessions survive the ~15-min audio
@@ -26,7 +26,7 @@ down — no browser warning, no recovery, no trace event.
 
 ## Plan (single commit per the project-workflow checklist)
 
-### Phase 1 — GoAway awareness (always on, near-free)
+### Phase 1 — GoAway awareness (always on, near-free) — Done (log + span event; no metric, no `SessionEnding` message)
 1. **Handle `msg.GoAway`** in `handleGeminiMessage`: warn-log with
    `TimeLeft`; emit span event + metric `voice.goaway{time_left_ms}`.
 2. **Browser notification:** add `SessionEnding *struct{Reason string; TimeLeftMs int64}`
@@ -34,7 +34,7 @@ down — no browser warning, no recovery, no trace event.
    - Test: `TestVoiceSession_GoAwayNotifiesBrowser`,
      `TestVoiceSession_GoAwayRecordsMetric`.
 
-### Phase 2 — Session resumption (flag `--voice-session-resumption`, default false)
+### Phase 2 — Session resumption (flag `--voice-session-resumption`, default false) — Done
 > The delicate phase. Teardown is trigger-on-first-error (`run`, `voice.go:587`):
 > any non-nil `errCh` value runs `cancel()` + `live.Close()` + end. So reconnect
 > must happen *inside* the read loop without surfacing the error, and must

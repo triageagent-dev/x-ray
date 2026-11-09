@@ -269,6 +269,11 @@ voice:
   # Proactive audio: the model may stay silent on out-of-context / background
   # speech instead of replying to everything. Native-audio only.
   proactiveAudio: true
+  # Session resumption (ADR-039): on a Gemini Live GoAway (the ~10-minute
+  # connection recycle) or a dropped connection, reconnect upstream with the
+  # latest resumption handle and keep the browser connected. true adds
+  # --voice-session-resumption to the container args. Off by default.
+  # sessionResumption: false
 
   # system_configuration MemoryCell — voice session config managed by Helm.
   # Changing any field here and running helm upgrade will patch the CR in-cluster.
@@ -299,6 +304,9 @@ voice:
     # / --voice-proactive-audio flag defaults; set explicitly to override per session.
     # affectiveDialog: true
     # proactiveAudio: true
+    # Session resumption per instance (ADR-039). Omit (unset) to use the
+    # --voice-session-resumption flag; set explicitly to override it.
+    # sessionResumption: true
     # Remote MCP servers wired into voice sessions. Empty = none.
     # NOTE: the former `xray-code` remote MCP service was REMOVED — the code-graph
     # tools (search_graph, search_graph_docs, get_graph_node,

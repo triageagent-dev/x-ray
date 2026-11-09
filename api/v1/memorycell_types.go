@@ -238,6 +238,14 @@ type VoiceSessionConfig struct {
 	// --voice-proactive-audio flag; non-nil overrides it.
 	// +optional
 	ProactiveAudio *bool `json:"proactiveAudio,omitempty"`
+
+	// SessionResumption keeps a voice session alive across Gemini Live connection
+	// recycles: the server reconnects upstream with the latest resumption handle
+	// on a GoAway or a dropped connection, and the browser stays connected. nil
+	// means "not set in CR" — the caller falls back to the
+	// --voice-session-resumption flag; non-nil overrides it. See ADR-039.
+	// +optional
+	SessionResumption *bool `json:"sessionResumption,omitempty"`
 }
 
 // MemoryCellStatus reports reconciler observations.

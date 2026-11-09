@@ -43,6 +43,9 @@ spec:
     {{- if hasKey .Values.voice.systemConfig "proactiveAudio" }}
     proactiveAudio: {{ .Values.voice.systemConfig.proactiveAudio }}
     {{- end }}
+    {{- if hasKey .Values.voice.systemConfig "sessionResumption" }}
+    sessionResumption: {{ .Values.voice.systemConfig.sessionResumption }}
+    {{- end }}
   {{- if .Values.voice.systemConfig.mcpServers }}
   mcp:
     servers:
