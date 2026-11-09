@@ -46,6 +46,12 @@ spec:
     {{- if hasKey .Values.voice.systemConfig "sessionResumption" }}
     sessionResumption: {{ .Values.voice.systemConfig.sessionResumption }}
     {{- end }}
+    {{- if hasKey .Values.voice.systemConfig "contextTriggerTokens" }}
+    contextTriggerTokens: {{ .Values.voice.systemConfig.contextTriggerTokens | int }}
+    {{- end }}
+    {{- if hasKey .Values.voice.systemConfig "contextTargetTokens" }}
+    contextTargetTokens: {{ .Values.voice.systemConfig.contextTargetTokens | int }}
+    {{- end }}
   {{- if .Values.voice.systemConfig.mcpServers }}
   mcp:
     servers:

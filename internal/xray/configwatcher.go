@@ -97,6 +97,11 @@ type VoiceSessionConfig struct {
 	// dropped connection (ADR-039). nil means "not set in CR" — the caller falls
 	// back to the --voice-session-resumption flag.
 	SessionResumption *bool
+	// ContextTriggerTokens / ContextTargetTokens turn on sliding-window context
+	// compression (ADR-039). 0 means "not set in CR" — the caller falls back to the
+	// --voice-context-trigger-tokens / --voice-context-target-tokens flags.
+	ContextTriggerTokens int
+	ContextTargetTokens  int
 	// Categories is the UI display category taxonomy (ADR-035 item 4). Empty
 	// means the UI falls back to its in-repo default taxonomy.
 	Categories []CategoryConfig
@@ -203,6 +208,8 @@ func parseVoiceConfig(cell *mcell.MemoryCell) *VoiceSessionConfig {
 		cfg.AffectiveDialog = vc.AffectiveDialog
 		cfg.ProactiveAudio = vc.ProactiveAudio
 		cfg.SessionResumption = vc.SessionResumption
+		cfg.ContextTriggerTokens = vc.ContextTriggerTokens
+		cfg.ContextTargetTokens = vc.ContextTargetTokens
 	}
 	if mc := cell.Spec.MCP; mc != nil {
 		for _, s := range mc.Servers {

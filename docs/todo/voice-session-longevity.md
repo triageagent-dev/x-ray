@@ -1,6 +1,6 @@
 # TODO: Voice Session Longevity (GoAway, Resumption, Context Compression)
 
-**Status:** Open — ADR-039 (Accepted); Phases 1 and 2 done 2026-11-09 (see ADR-039 "As built: capabilities 1 and 2")
+**Status:** Open — ADR-039 (Accepted); Phases 1, 2 and 3 done 2026-11-09 (see ADR-039 "As built: capabilities 1 and 2" and "As built: capability 3")
 
 Implements [ADR-039](../adr/039-voice-session-longevity.md). Three independent,
 flag-gated capabilities so Gemini Live voice sessions survive the ~15-min audio
@@ -63,12 +63,15 @@ down — no browser warning, no recovery, no trace event.
      `TestVoiceSession_TokenCountersSurviveReconnect`,
      `TestVoiceManager_ResumptionCRLOverridesFlag`.
 
-### Phase 3 — Context window compression (flags `--voice-context-trigger-tokens`, `--voice-context-target-tokens`, default 0)
+### Phase 3 — Context window compression (flags `--voice-context-trigger-tokens`, `--voice-context-target-tokens`, default 0) — done
 8. **Set** `ContextWindowCompression` with `TriggerTokens` / `SlidingWindow.TargetTokens`
    in `buildLiveConfig()` when trigger > 0. Validate trigger ∈ [5_000, 128_000]
    at startup; target < trigger.
    - Test: `TestVoiceManager_ContextCompressionDisabledWhenZero`,
-     `TestVoiceManager_ContextCompressionValidatesTriggerRange`,
+     `TestValidateContextCompression`,
+     `TestVoiceManager_ContextCompressionCROverridesFlags`,
+     `TestVoiceManager_ContextCompressionInvalidCRFallsBackToFlags`,
+     `TestVoiceSession_LiveConfigKeepsCompressionOnResume`,
      `TestConfigWatcher_ParsesContextTokens`.
 
 ### Phase 4 — Conversation quality (flags `--voice-affective-dialog`, `--voice-proactive-audio`, default false) — *native-audio only*

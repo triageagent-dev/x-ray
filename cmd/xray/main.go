@@ -94,6 +94,8 @@ func main() {
 		affectiveDialog           bool
 		proactiveAudio            bool
 		voiceSessionResumption    bool
+		voiceContextTriggerTokens int
+		voiceContextTargetTokens  int
 		maxConcurrentVoice        int
 		maxRequestBytes           int64
 		mcpListMemoryMaxLimit     int
@@ -157,6 +159,8 @@ func main() {
 	flag.BoolVar(&affectiveDialog, "voice-affective-dialog", false, "Enable Gemini Live affective dialog: model detects emotional tone and adapts responses (native-audio only)")
 	flag.BoolVar(&proactiveAudio, "voice-proactive-audio", false, "Enable Gemini Live proactive audio: model may stay silent on out-of-context/background speech (native-audio only)")
 	flag.BoolVar(&voiceSessionResumption, "voice-session-resumption", false, "Resume the Gemini Live session with its latest resumption handle on a GoAway or a dropped connection, keeping the browser connected (CR sessionResumption overrides). See ADR-039")
+	flag.IntVar(&voiceContextTriggerTokens, "voice-context-trigger-tokens", 0, "Gemini Live sliding-window context compression: once a voice session's context passes this many tokens the oldest turns are dropped (5000-128000; 0 = off; CR contextTriggerTokens overrides). See ADR-039")
+	flag.IntVar(&voiceContextTargetTokens, "voice-context-target-tokens", 0, "Size the context window is cut to when compression runs, below --voice-context-trigger-tokens (0 = the server's default, half the trigger; CR contextTargetTokens overrides). See ADR-039")
 	flag.Int64Var(&maxRequestBytes, "max-request-bytes", 1<<20, "Max request body size in bytes for non-WebSocket endpoints (0 = unlimited)")
 	flag.IntVar(&mcpListMemoryMaxLimit, "mcp-list-memory-max-limit", xray.DefaultMCPListMemoryMaxLimit, "Hard ceiling on list_memory's limit param, regardless of what the MCP caller requests. See ADR-051")
 	flag.IntVar(&mcpSearchMemoryMaxLimit, "mcp-search-memory-max-limit", xray.DefaultMCPSearchMemoryMaxLimit, "Hard ceiling on search_memory's limit param, regardless of what the MCP caller requests. See ADR-051")
@@ -225,6 +229,10 @@ func main() {
 		zerolog.SetGlobalLevel(zerolog.ErrorLevel)
 	default:
 		zerolog.SetGlobalLevel(zerolog.InfoLevel)
+	}
+
+	if err := xray.ValidateContextCompression(voiceContextTriggerTokens, voiceContextTargetTokens); err != nil {
+		log.Fatal().Err(err).Msg("invalid --voice-context-trigger-tokens / --voice-context-target-tokens")
 	}
 
 	logger := log.Logger
@@ -574,7 +582,7 @@ func main() {
 		if voiceLoc == "" {
 			voiceLoc = gcpLocation
 		}
-		vm = xray.NewVoiceManager(memory, configWatcher, secretStore, cellSyncer, namespace, gcpProject, voiceLoc, geminiAPIKey, voiceModel, voiceName, userDailyAudioTokenLimit, voiceMaxOutputTokens, headroomLimit, affectiveDialog, proactiveAudio, voiceSessionResumption, allowedOrigin, maxConcurrentVoice, logger)
+		vm = xray.NewVoiceManager(memory, configWatcher, secretStore, cellSyncer, namespace, gcpProject, voiceLoc, geminiAPIKey, voiceModel, voiceName, userDailyAudioTokenLimit, voiceMaxOutputTokens, headroomLimit, affectiveDialog, proactiveAudio, voiceSessionResumption, voiceContextTriggerTokens, voiceContextTargetTokens, allowedOrigin, maxConcurrentVoice, logger)
 		vm.SetMemMaps(memMapsDeps) // native code-graph voice tools (ADR-045); no-op when nil
 		srv.SetVoiceManager(vm)
 		log.Info().Msg("voice (Gemini Live) enabled at /v1/voice")
