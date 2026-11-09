@@ -1,7 +1,8 @@
 {{/*
 xray container args — a plain list driven from .Values.args: add/remove/reorder
 flags by editing values.yaml. The only conditionals are the switches below
-(dev, voice.sessionResumption), each appending one flag.
+(dev, voice.sessionResumption, voice.contextTriggerTokens and
+voice.contextTargetTokens), each appending one flag.
 */}}
 {{- define "xray.containerArgs" -}}
 {{- toYaml .Values.args }}
@@ -10,6 +11,12 @@ flags by editing values.yaml. The only conditionals are the switches below
 {{- end }}
 {{- if .Values.voice.sessionResumption }}
 - --voice-session-resumption
+{{- end }}
+{{- if .Values.voice.contextTriggerTokens }}
+- --voice-context-trigger-tokens={{ .Values.voice.contextTriggerTokens | int }}
+{{- end }}
+{{- if .Values.voice.contextTargetTokens }}
+- --voice-context-target-tokens={{ .Values.voice.contextTargetTokens | int }}
 {{- end }}
 {{- end -}}
 

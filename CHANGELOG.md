@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- **Voice sessions can compress their context, behind `--voice-context-trigger-tokens` (default 0, off; ADR-039).** Resumption keeps a session alive across the connection recycle, but Gemini Live also limits audio-only sessions to 15 minutes unless the context is compressed. With a trigger set (5000-128000 tokens), the server asks Gemini for a sliding window: once the context passes the trigger the oldest turns are dropped, never the system instruction. `--voice-context-target-tokens` (below the trigger; 0 leaves it to the server, half the trigger) is the size it is cut to. The pair can also be set per instance with `contextTriggerTokens` and `contextTargetTokens` in the configuration cell's `voiceConfig`, and the chart sets it with `voice.contextTriggerTokens` and `voice.contextTargetTokens`. A pair that fails the check stops the server at startup; one in the cell is logged and ignored. A resumed connection keeps the compression. The `MemoryCell` CRD gains two fields; Helm does not upgrade CRDs, so apply `charts/xray/crds/` before setting them.
+
 ## [2.8.0] - 2026-11-09
 
 ### Added

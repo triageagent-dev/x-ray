@@ -155,6 +155,8 @@ type VoiceManager struct {
 	affectiveDialog          bool   // --voice-affective-dialog: model detects emotional tone and adapts (native-audio)
 	proactiveAudio           bool   // --voice-proactive-audio: model may stay silent on out-of-context/background speech (native-audio)
 	sessionResumption        bool   // --voice-session-resumption flag default; CR SessionResumption overrides when set (ADR-039)
+	ctxTriggerTokens         int    // --voice-context-trigger-tokens flag default (0 = off); CR ContextTriggerTokens overrides when non-zero (ADR-039)
+	ctxTargetTokens          int    // --voice-context-target-tokens flag default (0 = server picks half the trigger); CR ContextTargetTokens overrides together with the CR trigger
 	maxConcurrent            int    // cap on simultaneous voice sessions; 0 = unlimited
 	pendingSlots             int    // sessions admitted but not yet registered; counts against maxConcurrent
 	upgrader                 websocket.Upgrader
@@ -174,7 +176,7 @@ func (m *VoiceManager) SetMemMaps(deps *recallmcp.Deps) {
 // NewVoiceManager creates a VoiceManager. syncer may be nil when k8s is unavailable.
 // allowedOrigin scopes the WebSocket Origin check (empty = allow any, dev only).
 // maxConcurrent caps simultaneous sessions (0 = unlimited).
-func NewVoiceManager(memory *MemoryStore, config *ConfigWatcher, secrets *SecretStore, syncer *CellSyncer, namespace, gcpProject, gcpLocation, geminiKey, voiceModel, voiceName string, userDailyAudioTokenLimit int64, maxOutputTokens, headroomLimit int, affectiveDialog, proactiveAudio, sessionResumption bool, allowedOrigin string, maxConcurrent int, logger zerolog.Logger) *VoiceManager {
+func NewVoiceManager(memory *MemoryStore, config *ConfigWatcher, secrets *SecretStore, syncer *CellSyncer, namespace, gcpProject, gcpLocation, geminiKey, voiceModel, voiceName string, userDailyAudioTokenLimit int64, maxOutputTokens, headroomLimit int, affectiveDialog, proactiveAudio, sessionResumption bool, ctxTriggerTokens, ctxTargetTokens int, allowedOrigin string, maxConcurrent int, logger zerolog.Logger) *VoiceManager {
 	return &VoiceManager{
 		sessions:                 make(map[string]*VoiceSession),
 		memory:                   memory,
@@ -193,6 +195,8 @@ func NewVoiceManager(memory *MemoryStore, config *ConfigWatcher, secrets *Secret
 		affectiveDialog:          affectiveDialog,
 		proactiveAudio:           proactiveAudio,
 		sessionResumption:        sessionResumption,
+		ctxTriggerTokens:         ctxTriggerTokens,
+		ctxTargetTokens:          ctxTargetTokens,
 		maxConcurrent:            maxConcurrent,
 		upgrader:                 newWSUpgrader(allowedOrigin),
 		// Allow a small burst of session starts, then ~1 every 6s per key —
@@ -237,6 +241,67 @@ func (m *VoiceManager) effectiveSessionResumption() bool {
 		return *v
 	}
 	return m.sessionResumption
+}
+
+// Bounds of the context-compression trigger (ADR-039): below the floor the
+// window would be cut on almost every turn, since the system prompt, tool schemas
+// and pinned memory alone take several thousand tokens; above the ceiling it
+// would never fire before the model's own 128k context ends the session.
+const (
+	minContextTriggerTokens = 5_000
+	maxContextTriggerTokens = 128_000
+)
+
+// ValidateContextCompression checks the --voice-context-trigger-tokens and
+// --voice-context-target-tokens pair: a trigger of 0 means compression is off
+// (and a target then has nothing to apply to); otherwise the trigger is within
+// [minContextTriggerTokens, maxContextTriggerTokens] and a non-zero target is
+// below it.
+func ValidateContextCompression(trigger, target int) error {
+	switch {
+	case trigger < 0 || target < 0:
+		return fmt.Errorf("context compression tokens must not be negative (trigger %d, target %d)", trigger, target)
+	case trigger == 0 && target != 0:
+		return fmt.Errorf("a context target of %d tokens needs a trigger: set --voice-context-trigger-tokens", target)
+	case trigger == 0:
+		return nil
+	case trigger < minContextTriggerTokens || trigger > maxContextTriggerTokens:
+		return fmt.Errorf("context trigger %d tokens is outside %d-%d", trigger, minContextTriggerTokens, maxContextTriggerTokens)
+	case target >= trigger && target != 0:
+		return fmt.Errorf("context target %d tokens must be below the trigger %d", target, trigger)
+	}
+	return nil
+}
+
+// contextCompressionConfig builds the Live config for a trigger/target pair, or
+// nil when compression is off. A target of 0 is left out, so the server uses half
+// the trigger. The pair must have passed ValidateContextCompression.
+func contextCompressionConfig(trigger, target int) *genai.ContextWindowCompressionConfig {
+	if trigger <= 0 {
+		return nil
+	}
+	sw := &genai.SlidingWindow{}
+	if target > 0 {
+		sw.TargetTokens = genai.Ptr(int64(target))
+	}
+	return &genai.ContextWindowCompressionConfig{TriggerTokens: genai.Ptr(int64(trigger)), SlidingWindow: sw}
+}
+
+// contextCompression resolves the compression a new session asks for (ADR-039):
+// the CR pair when its trigger is set, else the flags. The CR target applies only
+// with the CR trigger. A CR pair that fails validation is logged and ignored, and
+// the flags (validated at startup) apply, so a bad edit of the configuration
+// cell never reaches Gemini as a rejected setup.
+func (m *VoiceManager) contextCompression(logger zerolog.Logger) *genai.ContextWindowCompressionConfig {
+	trigger, target := m.ctxTriggerTokens, m.ctxTargetTokens
+	if vc := m.config.Get(); vc.ContextTriggerTokens != 0 {
+		if err := ValidateContextCompression(vc.ContextTriggerTokens, vc.ContextTargetTokens); err != nil {
+			logger.Warn().Err(err).Msg("voiceConfig context compression ignored; the flags apply")
+		} else {
+			trigger, target = vc.ContextTriggerTokens, vc.ContextTargetTokens
+		}
+	}
+	return contextCompressionConfig(trigger, target)
 }
 
 // UserQuota reports the per-user daily token quota for the given raw SSO ID.
@@ -449,7 +514,7 @@ func (m *VoiceManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Info().Str("remote", remote).Str("voice", voice).Strs("tools", toolNames).Int("prompt_len", len(systemPrompt)).Msg("voice session started")
 
-	session, err := newVoiceSession(r.Context(), id, ghUser, userHash, writeAllowed, conn, m.memory, m.syncer, genaiClient, liveModel, voice, systemPrompt, greeting, enabledTools, m.config.Get().Categories, pinnedIDs, mcpServers, m.secrets, m.namespace, headroomLimit, m.maxOutputTokens, affectiveDialog, proactiveAudio, m.effectiveSessionResumption(), m.memMapsDeps, log)
+	session, err := newVoiceSession(r.Context(), id, ghUser, userHash, writeAllowed, conn, m.memory, m.syncer, genaiClient, liveModel, voice, systemPrompt, greeting, enabledTools, m.config.Get().Categories, pinnedIDs, mcpServers, m.secrets, m.namespace, headroomLimit, m.maxOutputTokens, affectiveDialog, proactiveAudio, m.effectiveSessionResumption(), m.contextCompression(log), m.memMapsDeps, log)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to create voice session")
 		conn.WriteJSON(VoiceServerMessage{Error: fmt.Sprintf("failed to connect to voice model: %v", err)}) //nolint:errcheck
@@ -738,6 +803,7 @@ func newVoiceSession(
 	headroomLimit int,
 	maxOutputTokens int,
 	affectiveDialog, proactiveAudio, sessionResumption bool,
+	compression *genai.ContextWindowCompressionConfig,
 	memMapsDeps *recallmcp.Deps,
 	logger zerolog.Logger,
 ) (*VoiceSession, error) {
@@ -820,6 +886,9 @@ func newVoiceSession(
 	if proactiveAudio {
 		liveConfig.Proactivity = &genai.ProactivityConfig{ProactiveAudio: genai.Ptr(true)}
 	}
+	// Sliding-window compression of old turns (ADR-039), when configured: lifts the
+	// session-length limit that audio-only sessions have without it.
+	liveConfig.ContextWindowCompression = compression
 	s.liveConfig = liveConfig
 	liveSession, err := s.connect(ctx, s.liveConfigFor(""))
 	if err != nil {

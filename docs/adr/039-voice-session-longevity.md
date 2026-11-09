@@ -1,14 +1,17 @@
 # ADR-039: Voice Session Longevity & Conversation Quality — GoAway, Resumption, Compression, Affective Dialog, Proactive Audio
 
-**Status:** Accepted — capabilities 1 and 2 implemented (2026-11-09); 3 open
+**Status:** Accepted — capabilities 1, 2 and 3 implemented (2026-11-09)
 **Date:** 2026-06-03
 **Todo:** [voice-session-longevity](../todo/voice-session-longevity.md)
 
 > **Implemented (2026-11-09): capabilities 1 (GoAway awareness) and 2
 > (transparent session resumption),** plus a teardown fix. See
 > [As built: capabilities 1 and 2](#as-built-capabilities-1-and-2) for where the
-> implementation differs from the design below. Capabilities 3–5 are unchanged by
-> this note.
+> implementation differs from the design below.
+>
+> **Implemented (2026-11-09): capability 3 (context window compression).** See
+> [As built: capability 3](#as-built-capability-3). Capabilities 4 and 5 are
+> unchanged by these notes.
 
 > **Changes (2026-06-09):** The Google AI non-native model referenced below as an
 > example, `gemini-2.0-flash-live-001`, was retired by Google on 2025-12-09. Both
@@ -501,6 +504,35 @@ and the handle that follows it and expect the reconnect on that handle (`h2`),
 where they expected a reconnect on the handle held at the GoAway (`h1`).
 Disabling the replay fails the first two new tests; reconnecting at once on a
 GoAway fails the first.
+
+## As built: capability 3
+
+Resumption keeps a session alive across the ~10-minute connection recycle; it
+does not bound the session's context. Gemini Live limits audio-only sessions to
+15 minutes without context window compression, and compression is what lifts
+that limit. The two are separate limits and both are needed for a session of
+unbounded length.
+
+- **Wiring.** Flags `--voice-context-trigger-tokens` and
+  `--voice-context-target-tokens` (both default 0 = off) → `NewVoiceManager`; CR
+  `spec.voiceConfig.contextTriggerTokens` and `contextTargetTokens` (`api/v1`,
+  `int`) win when the trigger is set (`contextCompression`); chart
+  `voice.contextTriggerTokens` / `voice.contextTargetTokens` add the flags, and
+  `voice.systemConfig.contextTriggerTokens` / `contextTargetTokens` set the CR
+  fields.
+- **The pair goes together.** A CR trigger brings its own target (0 = the
+  server's default, half the trigger); the flag target is never mixed into a CR
+  pair, and a CR target with no CR trigger is ignored.
+- **Validation.** The trigger must be within 5000-128000 and a non-zero target
+  below it; a target with no trigger, and negative values, are refused. The flags
+  are checked at startup (`ValidateContextCompression`) and the server does not
+  start on a bad pair. A bad CR pair is logged and the flags apply, so a wrong
+  edit of the configuration cell cannot make Gemini reject a session's setup.
+- **A resumed connection keeps it.** The compression is part of the session's
+  Live config, so `liveConfigFor` opens every resumed connection with it.
+- **Sizing.** The system instruction is never compressed, so the trigger only has
+  to clear the fixed per-turn floor (system prompt, tool schemas, pinned memory)
+  plus recent tool results. Core runs 32000 / 16000.
 
 ## Alternatives considered
 

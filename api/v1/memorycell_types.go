@@ -246,6 +246,22 @@ type VoiceSessionConfig struct {
 	// --voice-session-resumption flag; non-nil overrides it. See ADR-039.
 	// +optional
 	SessionResumption *bool `json:"sessionResumption,omitempty"`
+
+	// ContextTriggerTokens turns on Gemini Live's sliding-window context
+	// compression: once the session's context passes this many tokens the server
+	// drops the oldest user-turn-aligned prefix (the system instruction is never
+	// dropped). Must be 5000-128000. 0 means "not set in CR" — the caller falls
+	// back to the --voice-context-trigger-tokens flag. See ADR-039.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	ContextTriggerTokens int `json:"contextTriggerTokens,omitempty"`
+
+	// ContextTargetTokens is the size the window is cut to when compression runs;
+	// it applies only together with ContextTriggerTokens and must be below it.
+	// 0 leaves the choice to the server (half the trigger). See ADR-039.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	ContextTargetTokens int `json:"contextTargetTokens,omitempty"`
 }
 
 // MemoryCellStatus reports reconciler observations.
