@@ -47,7 +47,7 @@ func NewEmbeddings(ctx context.Context, endpoint, model string, dims, maxInputCh
 	if maxInputChars <= 0 {
 		maxInputChars = 8192
 	}
-	e, err := index.NewEmbedder(ctx, endpoint, model, dims, maxInputChars, zerolog.Nop())
+	e, err := index.NewEmbedder(ctx, endpoint, model, dims, maxInputChars, 0, zerolog.Nop())
 	if err != nil {
 		return nil, fmt.Errorf("codegraph: embedder: %w", err)
 	}

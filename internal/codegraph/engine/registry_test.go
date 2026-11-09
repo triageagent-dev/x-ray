@@ -94,6 +94,18 @@ func TestFingerprintToleranceModelAdvisoryDimsStrict(t *testing.T) {
 	}
 }
 
+// A snapshot built before the token window existed decodes MaxInputTokens 0:
+// a server that cuts to a window must reject it, so the map is rebuilt.
+func TestFingerprintTokenWindowStrict(t *testing.T) {
+	emb := &stubEmbedder{dims: 64}
+	path, _ := buildSnapshot(t, "alpha", writeFixtureRepo(t, "alpha"), emb)
+
+	reg := NewRegistry(emb, EmbedFingerprint{Model: "stub", Dims: 64, MaxInputChars: 8192, MaxInputTokens: 512}, 1, 0, false, testLogger())
+	if err := reg.AddSnapshot(path); err == nil {
+		t.Fatalf("a snapshot without the token window must be rejected by a server with one")
+	}
+}
+
 func TestLoadWithoutEmbeddingNodes(t *testing.T) {
 	emb := &stubEmbedder{dims: 64}
 	path, _ := buildSnapshot(t, "alpha", writeFixtureRepo(t, "alpha"), emb)

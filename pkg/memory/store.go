@@ -90,7 +90,7 @@ func New(ctx context.Context, opts ...Option) (*Store, error) {
 		if cfg.dims <= 0 {
 			cfg.dims = 256
 		}
-		emb, err := index.NewEmbedder(ctx, cfg.endpoint, cfg.model, "", "", cfg.dims, cfg.maxInputChars, zerolog.Nop())
+		emb, err := index.NewEmbedder(ctx, cfg.endpoint, cfg.model, "", "", cfg.dims, cfg.maxInputChars, 0, zerolog.Nop())
 		if err != nil {
 			return nil, fmt.Errorf("memory: embedder: %w", err)
 		}

@@ -48,6 +48,7 @@ func runSearchTo(ctx context.Context, stdout, stderr io.Writer, argv []string) e
 	model := fs.String("embedding-model", "nomic", "embedding model name (must match the snapshots' fingerprint)")
 	dims := fs.Int("embedding-dims", 256, "embedding output dimensions (must match the snapshots' fingerprint)")
 	maxInputChars := fs.Int("embedding-max-input-chars", 8192, "hard char cap on input before embedding (must match the snapshots' fingerprint)")
+	maxInputTokens := fs.Int("embedding-max-input-tokens", 0, "the model's input window in tokens (0 = unknown; must match the snapshots' fingerprint); an input over it is cut to the longest prefix that fits, counted by the endpoint's own tokenizer (llama.cpp POST /tokenize). nomic-embed-text-v2-moe reads 512.")
 	logLevel := fs.String("log-level", "warn", "debug|info|warn|error, to stderr")
 	server := fs.String("server", "", "ask a running serve/serve-snapshots at this URL instead of reading snapshots")
 	keyPath := snapshotKeyFlag(fs)
@@ -81,11 +82,11 @@ func runSearchTo(ctx context.Context, stdout, stderr io.Writer, argv []string) e
 		return err
 	}
 	logger := newLogger(*logLevel)
-	emb, err := index.NewEmbedder(ctx, *endpoint, *model, *dims, *maxInputChars, logger)
+	emb, err := index.NewEmbedder(ctx, *endpoint, *model, *dims, *maxInputChars, *maxInputTokens, logger)
 	if err != nil {
 		return fmt.Errorf("embedder: %w", err)
 	}
-	fp := engine.EmbedFingerprint{Model: *model, Dims: *dims, MaxInputChars: *maxInputChars}
+	fp := engine.EmbedFingerprint{Model: *model, Dims: *dims, MaxInputChars: *maxInputChars, MaxInputTokens: *maxInputTokens}
 	return searchSnapshots(ctx, stdout, emb, fp, keys, *dir, *fanout, q, so, index.Select{Attr: attr, Order: order}, logger)
 }
 

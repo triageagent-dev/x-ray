@@ -79,7 +79,7 @@ func gateway(t *testing.T, status int, tokens int64, calls *atomic.Int64) *Embed
 		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	t.Cleanup(srv.Close)
-	e, err := NewEmbedder(context.Background(), srv.URL, "test-model", "", "", 0, 0, zerolog.Nop())
+	e, err := NewEmbedder(context.Background(), srv.URL, "test-model", "", "", 0, 0, 0, zerolog.Nop())
 	require.NoError(t, err)
 	return e
 }

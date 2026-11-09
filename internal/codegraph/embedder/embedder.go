@@ -16,8 +16,11 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/rs/zerolog"
+
+	"github.com/triageagent-dev/x-ray/v2/internal/tokencap"
 )
 
 // defaultMaxInputChars caps input length before the embed call. Local models
@@ -33,6 +36,7 @@ type Embedder struct {
 	model         string
 	outputDims    int // 0 = model native; otherwise Matryoshka truncate + renormalize
 	maxInputChars int
+	window        *tokencap.Cap // nil: no token window configured
 	client        *http.Client
 	logger        zerolog.Logger
 	cacheMu       sync.RWMutex
@@ -44,15 +48,18 @@ type Embedder struct {
 // NewEmbedder creates an Embedder against an OpenAI-compatible endpoint.
 // outputDims reduces the output dimension (0 = model native); it is applied
 // client-side as a Matryoshka truncation, see truncateNormalize.
-// maxInputChars hard-caps input length before the call (0 = defaultMaxInputChars).
-func NewEmbedder(_ context.Context, endpoint, model string, outputDims, maxInputChars int, logger zerolog.Logger) (*Embedder, error) {
+// maxInputChars hard-caps input length in bytes before the call (0 =
+// defaultMaxInputChars). maxInputTokens is the model's input window in tokens
+// (0 = unknown): an input over it is cut to the longest prefix that fits,
+// counted by the endpoint's own tokenizer.
+func NewEmbedder(_ context.Context, endpoint, model string, outputDims, maxInputChars, maxInputTokens int, logger zerolog.Logger) (*Embedder, error) {
 	if endpoint == "" {
 		return nil, fmt.Errorf("embeddings endpoint is required (e.g. -embed-endpoint http://localhost:8090)")
 	}
 	if maxInputChars <= 0 {
 		maxInputChars = defaultMaxInputChars
 	}
-	return &Embedder{
+	e := &Embedder{
 		endpoint:      strings.TrimRight(endpoint, "/"),
 		model:         model,
 		outputDims:    outputDims,
@@ -60,7 +67,11 @@ func NewEmbedder(_ context.Context, endpoint, model string, outputDims, maxInput
 		client:        &http.Client{Timeout: 30 * time.Second},
 		cache:         make(map[string][]float32),
 		logger:        logger,
-	}, nil
+	}
+	if maxInputTokens > 0 {
+		e.window = tokencap.New(e.endpoint, e.client, maxInputTokens)
+	}
+	return e, nil
 }
 
 // EmbedDocument returns the embedding vector for a document to be indexed.
@@ -171,7 +182,7 @@ func (e *Embedder) embed(ctx context.Context, text, taskType string) ([]float32,
 	if len(text) > e.maxInputChars {
 		e.logger.Warn().Int("orig_chars", len(text)).Int("cap", e.maxInputChars).
 			Str("text", truncate(text, 80)).Msg("embed input truncated to char cap (embedding quality reduced; raise the model context window or shorten the input)")
-		text = text[:e.maxInputChars]
+		text = capBytes(text, e.maxInputChars)
 	}
 	cacheKey := taskType + "\x00" + text
 
@@ -184,9 +195,20 @@ func (e *Embedder) embed(ctx context.Context, text, taskType string) ([]float32,
 		return cached, nil
 	}
 
+	// The token window applies to what is sent only: the cache key stays the
+	// byte-capped text, and the cut is a deterministic function of it.
+	sent, origTokens, err := e.window.Fit(ctx, text)
+	if err != nil {
+		return nil, err
+	}
+	if len(sent) < len(text) {
+		e.logger.Warn().Int("orig_tokens", origTokens).Int("orig_chars", len(text)).Int("sent_chars", len(sent)).
+			Str("text", truncate(text, 80)).Msg("embed input cut to the model's token window (embedding quality reduced; shorten the input)")
+	}
+
 	e.embedCalls.Add(1)
 	start := time.Now()
-	vec, err := e.embedGateway(ctx, text)
+	vec, err := e.embedGateway(ctx, sent)
 	if err != nil {
 		return nil, err
 	}
@@ -196,6 +218,18 @@ func (e *Embedder) embed(ctx context.Context, text, taskType string) ([]float32,
 	e.cache[cacheKey] = vec
 	e.cacheMu.Unlock()
 	return vec, nil
+}
+
+// capBytes cuts s to at most n bytes on a rune boundary, so a cut never sends
+// half of a multi-byte character.
+func capBytes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 func truncate(s string, n int) string {

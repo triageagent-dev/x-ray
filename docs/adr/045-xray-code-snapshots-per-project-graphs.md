@@ -195,3 +195,9 @@ xray-code serve-snapshots -snapshot-dir ~/.xray-cache -graph-ttl 30m -route-fano
 Follow-ups: Helm chart for the in-cluster worked-copy server; debounced/
 write-through flush option; HNSW-shared variant if per-project HNSW memory
 becomes a concern at higher project counts.
+
+## Amendments
+
+### 2026-11-09 — The fingerprint carries the token window
+
+The snapshot fingerprint is `{model, dims, maxInputChars, maxInputTokens}`. The byte cap (`--embedding-max-input-chars`) is a bound; the token window (`--embedding-max-input-tokens`) is the fit, counted by the endpoint's own tokenizer. A snapshot written before the field decodes `maxInputTokens` as 0, compares unequal to a server that sets a window, and is rebuilt (issue #61). `TestFingerprintTokenWindowStrict` covers the strict comparison.

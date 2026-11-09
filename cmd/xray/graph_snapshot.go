@@ -58,6 +58,7 @@ func runSnapshot(argv []string) error {
 	model := fs.String("embedding-model", "nomic", "embedding model name")
 	dims := fs.Int("embedding-dims", 256, "embedding output dimensions (Matryoshka truncation)")
 	maxInputChars := fs.Int("embedding-max-input-chars", 8192, "hard char cap on a node's text before embedding")
+	maxInputTokens := fs.Int("embedding-max-input-tokens", 0, "the model's input window in tokens (0 = unknown); an input over it is cut to the longest prefix that fits, counted by the endpoint's own tokenizer (llama.cpp POST /tokenize). nomic-embed-text-v2-moe reads 512.")
 	followSymlinks := fs.Bool("follow-symlinks", false, "descend into symlinked directories (default off — a repo with a symlink into a large tree, or into its own parent, would otherwise quietly balloon or hang every future build)")
 	logLevel := fs.String("log-level", "info", "debug|info|warn|error")
 	noSeed := fs.Bool("no-seed", false, "embed every node, ignoring the vectors an existing <snapshot-dir>/<label>.graph.gob.gz already holds")
@@ -75,11 +76,11 @@ func runSnapshot(argv []string) error {
 	if err != nil {
 		return err
 	}
-	embedder, err := index.NewEmbedder(ctx, *endpoint, *model, *dims, *maxInputChars, logger)
+	embedder, err := index.NewEmbedder(ctx, *endpoint, *model, *dims, *maxInputChars, *maxInputTokens, logger)
 	if err != nil {
 		return fmt.Errorf("embedder: %w", err)
 	}
-	fp := engine.EmbedFingerprint{Model: *model, Dims: *dims, MaxInputChars: *maxInputChars}
+	fp := engine.EmbedFingerprint{Model: *model, Dims: *dims, MaxInputChars: *maxInputChars, MaxInputTokens: *maxInputTokens}
 
 	for _, spec := range strings.Split(*repos, ",") {
 		spec = strings.TrimSpace(spec)

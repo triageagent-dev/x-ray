@@ -54,6 +54,10 @@ type EmbedFingerprint struct {
 	Model         string
 	Dims          int
 	MaxInputChars int
+	// MaxInputTokens is the model's input window the text was cut to (0 = no
+	// cut). Additive: a snapshot written before it decodes 0, so it compares
+	// unequal to a server that cuts, and is rebuilt.
+	MaxInputTokens int
 }
 
 // SnapshotHeader is the small, cheap-to-read prefix of a snapshot: enough to

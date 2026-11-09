@@ -40,6 +40,7 @@ func runServeSnapshots(argv []string) error {
 	model := fs.String("embedding-model", "nomic", "embedding model name (must match the snapshots' fingerprint)")
 	dims := fs.Int("embedding-dims", 256, "embedding output dimensions (must match the snapshots' fingerprint)")
 	maxInputChars := fs.Int("embedding-max-input-chars", 8192, "hard char cap on input before embedding (must match the snapshots' fingerprint)")
+	maxInputTokens := fs.Int("embedding-max-input-tokens", 0, "the model's input window in tokens (0 = unknown; must match the snapshots' fingerprint); an input over it is cut to the longest prefix that fits, counted by the endpoint's own tokenizer (llama.cpp POST /tokenize). nomic-embed-text-v2-moe reads 512.")
 	skillsMap := fs.String("skills-map", "skills", "map label backing list_skills/get_skill (one Doc node per SKILL.md); empty disables both tools")
 	memoryMap := fs.String("memory-map", "session", "map label that remember writes into by default; created on first use; empty disables the tool (needs -writable)")
 	memoryTTL := fs.String("memory-ttl", mcpserver.FormatTTL(mcpserver.DefaultMemoryTTL), "how long a note lives when remember names no ttl: a duration (7d, 24h, 90m) or never; expired notes are swept on read and hourly")
@@ -65,11 +66,11 @@ func runServeSnapshots(argv []string) error {
 		return err
 	}
 
-	embedder, err := index.NewEmbedder(ctx, *endpoint, *model, *dims, *maxInputChars, logger)
+	embedder, err := index.NewEmbedder(ctx, *endpoint, *model, *dims, *maxInputChars, *maxInputTokens, logger)
 	if err != nil {
 		return fmt.Errorf("embedder: %w", err)
 	}
-	fp := engine.EmbedFingerprint{Model: *model, Dims: *dims, MaxInputChars: *maxInputChars}
+	fp := engine.EmbedFingerprint{Model: *model, Dims: *dims, MaxInputChars: *maxInputChars, MaxInputTokens: *maxInputTokens}
 
 	noteTTL, err := mcpserver.ParseTTL(*memoryTTL)
 	if err != nil {

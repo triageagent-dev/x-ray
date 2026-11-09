@@ -37,7 +37,7 @@ func fixedEmbeddingHTTPServer(t *testing.T, vec []float32) *httptest.Server {
 func TestSearchTimed_ReportsEmbedAndIndexLatency(t *testing.T) {
 	vec := []float32{1, 0, 0, 0} // length must be a multiple of 4 (kshard/vector's SIMD cosine path)
 	srv := fixedEmbeddingHTTPServer(t, vec)
-	embedder, err := NewEmbedder(context.Background(), srv.URL, "test-model", "", "", 0, 0, zerolog.Nop())
+	embedder, err := NewEmbedder(context.Background(), srv.URL, "test-model", "", "", 0, 0, 0, zerolog.Nop())
 	if err != nil {
 		t.Fatalf("NewEmbedder: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestSearchTimed_ErrorSkipsIndexPhase(t *testing.T) {
 	// network dependency — same pattern as
 	// TestHybridSearch_LowConfidenceLexical_RecordsKWVoiceMiss in
 	// internal/core/memory_search_test.go.
-	embedder, err := NewEmbedder(context.Background(), "http://127.0.0.1:0", "test-model", "", "", 0, 0, zerolog.Nop())
+	embedder, err := NewEmbedder(context.Background(), "http://127.0.0.1:0", "test-model", "", "", 0, 0, 0, zerolog.Nop())
 	if err != nil {
 		t.Fatalf("NewEmbedder: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestSearchTimed_ErrorSkipsIndexPhase(t *testing.T) {
 func TestSearchTimed_MatchesSearch(t *testing.T) {
 	vec := []float32{1, 0, 0, 0}
 	srv := fixedEmbeddingHTTPServer(t, vec)
-	embedder, err := NewEmbedder(context.Background(), srv.URL, "test-model", "", "", 0, 0, zerolog.Nop())
+	embedder, err := NewEmbedder(context.Background(), srv.URL, "test-model", "", "", 0, 0, 0, zerolog.Nop())
 	if err != nil {
 		t.Fatalf("NewEmbedder: %v", err)
 	}

@@ -27,7 +27,7 @@ func TestEmbedder_UsageSink(t *testing.T) {
 		_, _ = w.Write([]byte(`{"data":[{"embedding":[0.6,0.8]}]}`))
 	}))
 	defer srv.Close()
-	e, err := NewEmbedder(context.Background(), srv.URL, "embed-model", "", "", 0, 0, zerolog.Nop())
+	e, err := NewEmbedder(context.Background(), srv.URL, "embed-model", "", "", 0, 0, 0, zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
 	}
