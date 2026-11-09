@@ -63,7 +63,7 @@ func newGatewayStore(t *testing.T, down *atomic.Bool) (*MemoryStore, *atomic.Int
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"embedding": textVec(req.Input)}}})
 	}))
 	t.Cleanup(srv.Close)
-	emb, err := index.NewEmbedder(context.Background(), srv.URL, "test-model", "", "", 8, 8192, 0, zerolog.Nop())
+	emb, err := index.NewEmbedder(context.Background(), srv.URL, "test-model", "", "", 8, 8192, zerolog.Nop())
 	require.NoError(t, err)
 	return NewMemoryStoreWithEmbedder(emb, zerolog.Nop()), &calls
 }

@@ -282,11 +282,12 @@ func main() {
 	// Memory store: HNSW with Vertex AI or gateway, keyword fallback if neither set.
 	var memory *xray.MemoryStore
 	if embedEndpoint != "" || gcpProject != "" {
-		embedder, err := index.NewEmbedder(context.Background(), embedEndpoint, embedModel, gcpProject, gcpLocation, embedDims, embedMaxInputChars, embedMaxInputTokens, log.Logger)
+		embedder, err := index.NewEmbedder(context.Background(), embedEndpoint, embedModel, gcpProject, gcpLocation, embedDims, embedMaxInputChars, log.Logger)
 		if err != nil {
 			log.Warn().Err(err).Msg("embedding init failed — using keyword memory")
 			memory = xray.NewMemoryStore()
 		} else {
+			embedder.SetMaxInputTokens(embedMaxInputTokens)
 			log.Info().Str("endpoint", embedEndpoint).Str("project", gcpProject).Str("model", embedModel).Float64("score_gap", semanticScoreGap).Bool("lexical_shortcircuit", searchLexicalShortCircuit).Msg("HNSW semantic memory enabled")
 			memory = xray.NewMemoryStoreWithEmbedder(embedder, logger)
 			memory.SetSemanticScoreGap(float32(semanticScoreGap))
@@ -695,11 +696,12 @@ func registerCellIndexes(mgr ctrl.Manager) error {
 // on any failure — the caller continues without code tools, so a snapshot problem
 // can never crash the server. Snapshots are rebuilt offline by the CGO build of this binary.
 func loadMemsnapGraph(dir, keyFile, embedEndpoint, embedModel string, embedDims, embedMaxInputChars, embedMaxInputTokens, fanout, ttlMin int, logger zerolog.Logger) *graphmcp.Deps {
-	emb, err := msindex.NewEmbedder(context.Background(), embedEndpoint, embedModel, embedDims, embedMaxInputChars, embedMaxInputTokens, logger)
+	emb, err := msindex.NewEmbedder(context.Background(), embedEndpoint, embedModel, embedDims, embedMaxInputChars, logger)
 	if err != nil {
 		log.Error().Err(err).Msg("code-graph embedder init failed; code tools disabled")
 		return nil
 	}
+	emb.SetMaxInputTokens(embedMaxInputTokens)
 	fp := msengine.EmbedFingerprint{Model: embedModel, Dims: embedDims, MaxInputChars: embedMaxInputChars, MaxInputTokens: embedMaxInputTokens}
 	reg := msengine.NewRegistry(emb, fp, fanout, time.Duration(ttlMin)*time.Minute, false, logger)
 	if keyFile == "" {

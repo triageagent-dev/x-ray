@@ -47,11 +47,30 @@ func NewEmbeddings(ctx context.Context, endpoint, model string, dims, maxInputCh
 	if maxInputChars <= 0 {
 		maxInputChars = 8192
 	}
-	e, err := index.NewEmbedder(ctx, endpoint, model, dims, maxInputChars, 0, zerolog.Nop())
+	e, err := index.NewEmbedder(ctx, endpoint, model, dims, maxInputChars, zerolog.Nop())
 	if err != nil {
 		return nil, fmt.Errorf("codegraph: embedder: %w", err)
 	}
 	return &Embeddings{Embedder: e, fp: engine.EmbedFingerprint{Model: model, Dims: dims, MaxInputChars: maxInputChars}}, nil
+}
+
+// SetMaxInputTokens sets the model's input window in tokens (512 for
+// nomic-embed-text-v2-moe) and records it in the fingerprint, so a snapshot
+// built without the same window is refused on Load. With NewEmbeddings, a node
+// over the window is cut to the longest prefix that fits, counted by the
+// endpoint's own tokenizer (llama.cpp POST /tokenize); an endpoint without one
+// gets the text as maxInputChars caps it. A custom Embedder gets the window
+// when it has a SetMaxInputTokens(int) method; otherwise the window is only
+// recorded, as model and dims are. n <= 0 is a no-op. Set it before Build or
+// Load.
+func (e *Embeddings) SetMaxInputTokens(n int) {
+	if n <= 0 {
+		return
+	}
+	if s, ok := e.Embedder.(interface{ SetMaxInputTokens(int) }); ok {
+		s.SetMaxInputTokens(n)
+	}
+	e.fp.MaxInputTokens = n
 }
 
 // CustomEmbeddings wraps your own Embedder. model, dims and maxInputChars are

@@ -47,7 +47,9 @@ against any llama.cpp-compatible `/v1/embeddings`, nomic at 256 dimensions
 a dense node under the cap can still exceed the model's window, and llama.cpp
 refuses such an input rather than truncating it; `-embedding-max-input-tokens`
 (the window, 512 for nomic-embed-text-v2-moe) cuts it to the longest prefix
-that fits, counted by the endpoint's `POST /tokenize`.
+that fits, counted by the endpoint's `POST /tokenize`. An endpoint that cannot
+count gets the byte-capped text with a warning; a 404 or 405 from `/tokenize`
+turns counting off for the life of the process.
 
 ## Snapshot
 

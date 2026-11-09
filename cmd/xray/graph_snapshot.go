@@ -76,10 +76,11 @@ func runSnapshot(argv []string) error {
 	if err != nil {
 		return err
 	}
-	embedder, err := index.NewEmbedder(ctx, *endpoint, *model, *dims, *maxInputChars, *maxInputTokens, logger)
+	embedder, err := index.NewEmbedder(ctx, *endpoint, *model, *dims, *maxInputChars, logger)
 	if err != nil {
 		return fmt.Errorf("embedder: %w", err)
 	}
+	embedder.SetMaxInputTokens(*maxInputTokens)
 	fp := engine.EmbedFingerprint{Model: *model, Dims: *dims, MaxInputChars: *maxInputChars, MaxInputTokens: *maxInputTokens}
 
 	for _, spec := range strings.Split(*repos, ",") {

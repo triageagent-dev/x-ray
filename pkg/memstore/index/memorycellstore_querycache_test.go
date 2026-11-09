@@ -35,7 +35,7 @@ func TestSearchTimed_QueryCacheAvoidsRepeatEmbedRoundTrip(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	embedder, err := NewEmbedder(context.Background(), srv.URL, "test-model", "", "", 0, 0, 0, zerolog.Nop())
+	embedder, err := NewEmbedder(context.Background(), srv.URL, "test-model", "", "", 0, 0, zerolog.Nop())
 	if err != nil {
 		t.Fatalf("NewEmbedder: %v", err)
 	}

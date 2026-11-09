@@ -46,7 +46,7 @@ func newFixture(t *testing.T, cfg SearchConfig) *fixture {
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"embedding": v}}})
 	}))
 	t.Cleanup(srv.Close)
-	emb, err := xindex.NewEmbedder(context.Background(), srv.URL, "m", "", "", 0, 0, 0, zerolog.Nop())
+	emb, err := xindex.NewEmbedder(context.Background(), srv.URL, "m", "", "", 0, 0, zerolog.Nop())
 	require.NoError(t, err)
 	f.cells = xindex.NewCellStore(emb, zerolog.Nop())
 	f.cells.SetScoreGap(0)

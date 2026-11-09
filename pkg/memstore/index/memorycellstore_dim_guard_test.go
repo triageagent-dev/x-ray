@@ -63,7 +63,7 @@ func TestSeedFromEmbedding_RejectsDimensionMismatch(t *testing.T) {
 func TestMemoryCellStore_ConfiguredDimsProtectsBulkSeed(t *testing.T) {
 	ctx := context.Background()
 	srv := fixedEmbeddingHTTPServer(t, []float32{1, 0, 0, 0}) // query embed: 4 dims
-	embedder, err := NewEmbedder(ctx, srv.URL, "test-model", "", "", 4, 0, 0, zerolog.Nop())
+	embedder, err := NewEmbedder(ctx, srv.URL, "test-model", "", "", 4, 0, zerolog.Nop())
 	if err != nil {
 		t.Fatalf("NewEmbedder: %v", err)
 	}
@@ -120,7 +120,7 @@ func statefulEmbeddingServer(t *testing.T, vecs ...[]float32) *httptest.Server {
 func TestIndex_RejectsDimensionMismatch(t *testing.T) {
 	ctx := context.Background()
 	srv := statefulEmbeddingServer(t, []float32{1, 0, 0, 0}, []float32{1, 0, 0, 0, 0, 0, 0, 0})
-	embedder, err := NewEmbedder(ctx, srv.URL, "test-model", "", "", 0, 0, 0, zerolog.Nop())
+	embedder, err := NewEmbedder(ctx, srv.URL, "test-model", "", "", 0, 0, zerolog.Nop())
 	if err != nil {
 		t.Fatalf("NewEmbedder: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestSearchByEmbedding_RejectsDimensionMismatchQuery(t *testing.T) {
 func TestSearch_RejectsDimensionMismatchQuery(t *testing.T) {
 	ctx := context.Background()
 	srv := statefulEmbeddingServer(t, []float32{1, 0, 0, 0}, []float32{1, 0, 0, 0, 0, 0, 0, 0})
-	embedder, err := NewEmbedder(ctx, srv.URL, "test-model", "", "", 0, 0, 0, zerolog.Nop())
+	embedder, err := NewEmbedder(ctx, srv.URL, "test-model", "", "", 0, 0, zerolog.Nop())
 	if err != nil {
 		t.Fatalf("NewEmbedder: %v", err)
 	}

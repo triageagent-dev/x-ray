@@ -49,17 +49,16 @@ type Embedder struct {
 // outputDims reduces the output dimension (0 = model native); it is applied
 // client-side as a Matryoshka truncation, see truncateNormalize.
 // maxInputChars hard-caps input length in bytes before the call (0 =
-// defaultMaxInputChars). maxInputTokens is the model's input window in tokens
-// (0 = unknown): an input over it is cut to the longest prefix that fits,
-// counted by the endpoint's own tokenizer.
-func NewEmbedder(_ context.Context, endpoint, model string, outputDims, maxInputChars, maxInputTokens int, logger zerolog.Logger) (*Embedder, error) {
+// defaultMaxInputChars). Bytes are not tokens, so SetMaxInputTokens fits the
+// input to the model's window.
+func NewEmbedder(_ context.Context, endpoint, model string, outputDims, maxInputChars int, logger zerolog.Logger) (*Embedder, error) {
 	if endpoint == "" {
 		return nil, fmt.Errorf("embeddings endpoint is required (e.g. -embed-endpoint http://localhost:8090)")
 	}
 	if maxInputChars <= 0 {
 		maxInputChars = defaultMaxInputChars
 	}
-	e := &Embedder{
+	return &Embedder{
 		endpoint:      strings.TrimRight(endpoint, "/"),
 		model:         model,
 		outputDims:    outputDims,
@@ -67,11 +66,18 @@ func NewEmbedder(_ context.Context, endpoint, model string, outputDims, maxInput
 		client:        &http.Client{Timeout: 30 * time.Second},
 		cache:         make(map[string][]float32),
 		logger:        logger,
+	}, nil
+}
+
+// SetMaxInputTokens sets the model's input window in tokens: an input over it
+// is cut to the longest prefix that fits, counted by the endpoint's own
+// tokenizer (llama.cpp POST /tokenize). When the count fails the byte-capped
+// text is sent and the failure is logged. n <= 0 is a no-op. Set it before the
+// embedder is shared.
+func (e *Embedder) SetMaxInputTokens(n int) {
+	if e != nil && n > 0 {
+		e.window = tokencap.New(e.endpoint, e.client, n)
 	}
-	if maxInputTokens > 0 {
-		e.window = tokencap.New(e.endpoint, e.client, maxInputTokens)
-	}
-	return e, nil
 }
 
 // EmbedDocument returns the embedding vector for a document to be indexed.
@@ -196,12 +202,13 @@ func (e *Embedder) embed(ctx context.Context, text, taskType string) ([]float32,
 	}
 
 	// The token window applies to what is sent only: the cache key stays the
-	// byte-capped text, and the cut is a deterministic function of it.
+	// byte-capped text, and the cut is a deterministic function of it. A failed
+	// count is not a failed embed: Fit returns the byte-capped text, and the
+	// server's answer decides.
 	sent, origTokens, err := e.window.Fit(ctx, text)
 	if err != nil {
-		return nil, err
-	}
-	if len(sent) < len(text) {
+		e.logger.Warn().Err(err).Str("text", truncate(text, 80)).Msg("embed input not counted against the token window; sending it byte-capped")
+	} else if len(sent) < len(text) {
 		e.logger.Warn().Int("orig_tokens", origTokens).Int("orig_chars", len(text)).Int("sent_chars", len(sent)).
 			Str("text", truncate(text, 80)).Msg("embed input cut to the model's token window (embedding quality reduced; shorten the input)")
 	}

@@ -199,3 +199,25 @@ func TestSaveLoad_RoundTripWithoutReparsing(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "built with", "a snapshot from another embedding space is refused")
 }
+
+// The window is part of the fingerprint: a snapshot built without it is
+// refused by embeddings that set one, and loads with embeddings that set the same.
+func TestLoad_TheTokenWindowIsPartOfTheFingerprint(t *testing.T) {
+	ctx := context.Background()
+	g, _ := build(t)
+	snap := filepath.Join(t.TempDir(), "shop.graph.gob.gz")
+	require.NoError(t, g.Save(ctx, snap))
+
+	windowed := embeddings()
+	windowed.SetMaxInputTokens(512)
+	_, err := codegraph.Load(ctx, snap, windowed)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "MaxInputTokens:512", "a snapshot built without the window is refused")
+
+	wg, err := codegraph.Build(ctx, windowed, codegraph.Repo{Label: "shop", Path: writeRepo(t)})
+	require.NoError(t, err)
+	wsnap := filepath.Join(t.TempDir(), "shop.graph.gob.gz")
+	require.NoError(t, wg.Save(ctx, wsnap))
+	_, err = codegraph.Load(ctx, wsnap, windowed)
+	require.NoError(t, err, "a snapshot built with the window loads with the same window")
+}

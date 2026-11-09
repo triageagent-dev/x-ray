@@ -16,7 +16,7 @@ import (
 func TestSearchExhaustiveTimed_RankedOrder_NoTruncation(t *testing.T) {
 	vec := []float32{1, 0, 0, 0}
 	srv := fixedEmbeddingHTTPServer(t, vec)
-	embedder, err := NewEmbedder(context.Background(), srv.URL, "test-model", "", "", 0, 0, 0, zerolog.Nop())
+	embedder, err := NewEmbedder(context.Background(), srv.URL, "test-model", "", "", 0, 0, zerolog.Nop())
 	if err != nil {
 		t.Fatalf("NewEmbedder: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestSearchExhaustiveTimed_RankedOrder_NoTruncation(t *testing.T) {
 func TestSearchExhaustiveTimed_KindFilter(t *testing.T) {
 	vec := []float32{1, 0, 0, 0}
 	srv := fixedEmbeddingHTTPServer(t, vec)
-	embedder, err := NewEmbedder(context.Background(), srv.URL, "test-model", "", "", 0, 0, 0, zerolog.Nop())
+	embedder, err := NewEmbedder(context.Background(), srv.URL, "test-model", "", "", 0, 0, zerolog.Nop())
 	if err != nil {
 		t.Fatalf("NewEmbedder: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestSearchExhaustiveTimed_KindFilter(t *testing.T) {
 func TestSearchExhaustiveTimed_KeepPreFilter(t *testing.T) {
 	vec := []float32{1, 0, 0, 0}
 	srv := fixedEmbeddingHTTPServer(t, vec)
-	embedder, err := NewEmbedder(context.Background(), srv.URL, "test-model", "", "", 0, 0, 0, zerolog.Nop())
+	embedder, err := NewEmbedder(context.Background(), srv.URL, "test-model", "", "", 0, 0, zerolog.Nop())
 	if err != nil {
 		t.Fatalf("NewEmbedder: %v", err)
 	}

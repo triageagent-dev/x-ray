@@ -4,8 +4,11 @@
 
 ### Added
 - **`--embedding-max-input-tokens` cuts embedding input to the model's window (#61).** The input cap counts bytes and the model's limit is tokens; a dense policy section reached 607 tokens within 1800 bytes against nomic-embed-text-v2-moe's 512, and llama.cpp answered 400 instead of truncating, which failed `xray graph snapshot` and left such a cell unindexed. With the flag set (0, the default, is off), an input over the window is cut, when it is sent, to the longest prefix that fits, counted by the endpoint's own `POST /tokenize`; cache keys and fingerprints keep the byte-capped text. The graph snapshot fingerprint carries the window, so a map built without it is rebuilt.
+- The window is set with the flag (the server and the `xray graph` commands), with `memory.WithMaxInputTokens` in `pkg/memory`, and with `(*codegraph.Embeddings).SetMaxInputTokens` in `pkg/codegraph`; the embedders take it through `SetMaxInputTokens`, next to `SetUsageSink`. No constructor signature changes.
+- When the endpoint cannot count (an OpenAI-compatible gateway with no `/tokenize`, or a failing tokenizer), the byte-capped text is sent with a warning and the server's answer decides; a tokenizer error is not an embed error. A 404 or 405 from `/tokenize` is logged once and the embedder stops counting for the life of the process.
 
 ### Changed
+- A graph map node (a code symbol, or a document cell in a document map) whose text is cut at the byte cap inside a multi-byte character now ends one character earlier, on the character boundary, so its vector is recomputed once after the upgrade.
 - The released image is built for `linux/amd64` and `linux/arm64` (`make push` passes `--platform` to ko), so the chart runs on arm64 nodes.
 
 ## [2.7.0] - 2026-11-06

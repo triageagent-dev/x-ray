@@ -28,7 +28,7 @@ func textGateway(t *testing.T, vecs map[string][]float32) *Embedder {
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"embedding": v}}})
 	}))
 	t.Cleanup(srv.Close)
-	e, err := NewEmbedder(context.Background(), srv.URL, "m", "", "", 0, 0, 0, zerolog.Nop())
+	e, err := NewEmbedder(context.Background(), srv.URL, "m", "", "", 0, 0, zerolog.Nop())
 	require.NoError(t, err)
 	return e
 }

@@ -84,6 +84,18 @@ func (e *Embedder) SetErrorSink(fn ErrorFunc) {
 	}
 }
 
+// SetMaxInputTokens sets the gateway model's input window in tokens: an input
+// over it is cut to the longest prefix that fits, counted by the endpoint's
+// own tokenizer (llama.cpp POST /tokenize). When the count fails the
+// byte-capped text is sent and the failure is logged. n <= 0 is a no-op, and so
+// is Vertex AI mode, which truncates server-side. Set it before the embedder is
+// shared.
+func (e *Embedder) SetMaxInputTokens(n int) {
+	if e != nil && e.genai == nil && n > 0 {
+		e.window = tokencap.New(e.endpoint, e.client, n)
+	}
+}
+
 // Model is the embedding model name.
 func (e *Embedder) Model() string {
 	if e == nil {
@@ -98,11 +110,10 @@ func (e *Embedder) Model() string {
 // outputDims reduces the output vector dimension (0 = model default). Applied to
 // Vertex AI natively, and to the gateway via the OpenAI-compatible "dimensions"
 // param (e.g. Matryoshka models like nomic-embed-text truncate cleanly to 128/256/512).
-// maxInputChars hard-caps input length in bytes before the embed call (0 = defaultMaxInputChars).
-// maxInputTokens is the gateway model's input window in tokens (0 = unknown): an
-// input over it is cut to the longest prefix that fits, counted by the
-// endpoint's own tokenizer. Vertex AI truncates server-side and ignores it.
-func NewEmbedder(ctx context.Context, endpoint, model, project, location string, outputDims, maxInputChars, maxInputTokens int, logger zerolog.Logger) (*Embedder, error) {
+// maxInputChars hard-caps input length in bytes before the embed call (0 = defaultMaxInputChars);
+// set it below the model's token window × ~4 to avoid the gateway rejecting oversized input.
+// Bytes are not tokens, so SetMaxInputTokens fits the input to the window.
+func NewEmbedder(ctx context.Context, endpoint, model, project, location string, outputDims, maxInputChars int, logger zerolog.Logger) (*Embedder, error) {
 	if maxInputChars <= 0 {
 		maxInputChars = defaultMaxInputChars
 	}
@@ -122,9 +133,6 @@ func NewEmbedder(ctx context.Context, endpoint, model, project, location string,
 		e.genai = gc
 	} else {
 		e.client = &http.Client{Timeout: 30 * time.Second}
-		if maxInputTokens > 0 {
-			e.window = tokencap.New(e.endpoint, e.client, maxInputTokens)
-		}
 	}
 	return e, nil
 }
@@ -286,12 +294,12 @@ func (e *Embedder) embed(ctx context.Context, text, taskType string) ([]float32,
 	// The token window applies to what is sent only: the cache key and the
 	// fingerprint stay the byte-capped text, and the cut is a deterministic
 	// function of it. A tokenize call is not a provider request, so it is not
-	// timed or reported to the usage sink.
+	// timed or reported to the usage sink. A failed count is not a failed
+	// embed: Fit returns the byte-capped text, and the server's answer decides.
 	sent, origTokens, err := e.window.Fit(ctx, text)
 	if err != nil {
-		return nil, err
-	}
-	if len(sent) < len(text) {
+		e.logger.Warn().Err(err).Str("text", truncate(text, 80)).Msg("embed input not counted against the token window; sending it byte-capped")
+	} else if len(sent) < len(text) {
 		e.logger.Warn().Int("orig_tokens", origTokens).Int("orig_chars", len(text)).Int("sent_chars", len(sent)).
 			Str("text", truncate(text, 80)).Msg("embed input cut to the model's token window (embedding quality reduced; shorten the cell)")
 	}

@@ -241,10 +241,11 @@ func runServiceMap(argv []string) error {
 		return fmt.Errorf("no entries in %q", *in)
 	}
 
-	embedder, err := index.NewEmbedder(ctx, *endpoint, *model, *dims, *maxInputChars, *maxInputTokens, logger)
+	embedder, err := index.NewEmbedder(ctx, *endpoint, *model, *dims, *maxInputChars, logger)
 	if err != nil {
 		return fmt.Errorf("embedder: %w", err)
 	}
+	embedder.SetMaxInputTokens(*maxInputTokens)
 	fp := engine.EmbedFingerprint{Model: *model, Dims: *dims, MaxInputChars: *maxInputChars, MaxInputTokens: *maxInputTokens}
 	snap, st, err := buildCatalogSnapshot(ctx, entries, *label, *in, *summary, embedder, fp, logger)
 	if err != nil {

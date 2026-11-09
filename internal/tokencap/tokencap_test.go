@@ -117,11 +117,44 @@ func TestFit_MixedCyrillicAndLatin(t *testing.T) {
 	assertLongestFit(t, text, got, 128)
 }
 
-func TestFit_TokenizerErrorIsReturned(t *testing.T) {
+// A failed count returns the text unchanged with the error, for the caller to
+// send as it is; a 500 may pass, so every Fit asks again.
+func TestFit_AFailedCountReturnsTheTextAndIsNotRemembered(t *testing.T) {
 	var calls atomic.Int64
 	c := New(tokenizer(t, http.StatusInternalServerError, &calls), http.DefaultClient, 16)
-	if _, _, err := c.Fit(context.Background(), strings.Repeat("x", 100)); err == nil {
-		t.Fatal("a tokenizer answering 500 must fail the fit")
+	text := strings.Repeat("x", 100)
+	for i := 1; i <= 2; i++ {
+		got, _, err := c.Fit(context.Background(), text)
+		if err == nil || got != text {
+			t.Fatalf("Fit #%d against a 500 = %d chars, %v; want the text unchanged and an error", i, len(got), err)
+		}
+		if calls.Load() != int64(i) {
+			t.Fatalf("after Fit #%d the tokenizer had %d calls, want %d: a 500 is not remembered", i, calls.Load(), i)
+		}
+	}
+}
+
+// An endpoint without the route (an OpenAI-compatible gateway, not llama.cpp)
+// is reported once; later Fits pass the text through without a request.
+func TestFit_NoTokenizeRouteIsReportedOnceThenNotAskedAgain(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusMethodNotAllowed} {
+		var calls atomic.Int64
+		c := New(tokenizer(t, status, &calls), http.DefaultClient, 16)
+		text := strings.Repeat("x", 100)
+
+		got, _, err := c.Fit(context.Background(), text)
+		if err == nil || got != text {
+			t.Fatalf("status %d: first Fit = %d chars, %v; want the text unchanged and an error", status, len(got), err)
+		}
+		for i := 0; i < 2; i++ {
+			got, n, err := c.Fit(context.Background(), text)
+			if err != nil || got != text || n != 0 {
+				t.Fatalf("status %d: a later Fit = %d chars, %d tokens, %v; want the text unchanged, no error", status, len(got), n, err)
+			}
+		}
+		if calls.Load() != 1 {
+			t.Fatalf("status %d: the tokenizer had %d calls, want 1", status, calls.Load())
+		}
 	}
 }
 

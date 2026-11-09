@@ -82,10 +82,11 @@ func runSearchTo(ctx context.Context, stdout, stderr io.Writer, argv []string) e
 		return err
 	}
 	logger := newLogger(*logLevel)
-	emb, err := index.NewEmbedder(ctx, *endpoint, *model, *dims, *maxInputChars, *maxInputTokens, logger)
+	emb, err := index.NewEmbedder(ctx, *endpoint, *model, *dims, *maxInputChars, logger)
 	if err != nil {
 		return fmt.Errorf("embedder: %w", err)
 	}
+	emb.SetMaxInputTokens(*maxInputTokens)
 	fp := engine.EmbedFingerprint{Model: *model, Dims: *dims, MaxInputChars: *maxInputChars, MaxInputTokens: *maxInputTokens}
 	return searchSnapshots(ctx, stdout, emb, fp, keys, *dir, *fanout, q, so, index.Select{Attr: attr, Order: order}, logger)
 }

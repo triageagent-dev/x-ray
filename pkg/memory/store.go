@@ -34,6 +34,7 @@ type config struct {
 	model         string
 	dims          int
 	maxInputChars int
+	maxTokens     int
 	path          string
 	origin        string
 	dedup         bool
@@ -54,6 +55,13 @@ func WithEmbeddings(endpoint, model string, dims int) Option {
 // WithMaxInputChars caps the text sent to the embedder per item. The default is
 // 8192, which fits a 2048-token model.
 func WithMaxInputChars(n int) Option { return func(c *config) { c.maxInputChars = n } }
+
+// WithMaxInputTokens sets the embedding model's input window in tokens (512 for
+// nomic-embed-text-v2-moe). An item over it is cut to the longest prefix that
+// fits, counted by the endpoint's own tokenizer (llama.cpp POST /tokenize);
+// an endpoint without one gets the text as WithMaxInputChars caps it. The
+// default, 0, sends that text without counting.
+func WithMaxInputTokens(n int) Option { return func(c *config) { c.maxTokens = n } }
 
 // WithFile keeps the store in a JSON file: loaded on New, rewritten after every
 // change. The file holds every item, private ones included, so give it the
@@ -90,10 +98,11 @@ func New(ctx context.Context, opts ...Option) (*Store, error) {
 		if cfg.dims <= 0 {
 			cfg.dims = 256
 		}
-		emb, err := index.NewEmbedder(ctx, cfg.endpoint, cfg.model, "", "", cfg.dims, cfg.maxInputChars, 0, zerolog.Nop())
+		emb, err := index.NewEmbedder(ctx, cfg.endpoint, cfg.model, "", "", cfg.dims, cfg.maxInputChars, zerolog.Nop())
 		if err != nil {
 			return nil, fmt.Errorf("memory: embedder: %w", err)
 		}
+		emb.SetMaxInputTokens(cfg.maxTokens)
 		m = ixray.NewMemoryStoreWithEmbedder(emb, zerolog.Nop())
 	} else {
 		m = ixray.NewMemoryStore()

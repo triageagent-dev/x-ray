@@ -15,13 +15,16 @@ import (
 
 // llama is a llama.cpp-shaped server with a token window: POST /tokenize counts
 // one token per two runes plus two special tokens, and /v1/embeddings refuses an
-// input over the window with llama.cpp's 400 instead of truncating it. It
-// records every input the embeddings route received.
+// input over the window with llama.cpp's 400 instead of truncating it. With
+// tokenizeStatus set, /tokenize answers that status instead and /v1/embeddings
+// accepts any input, as a gateway that truncates on its side does. It records
+// every input the embeddings route received.
 type llama struct {
-	window    int
-	mu        sync.Mutex
-	inputs    []string
-	tokenizes int
+	window         int
+	tokenizeStatus int
+	mu             sync.Mutex
+	inputs         []string
+	tokenizes      int
 }
 
 func (l *llama) count(s string) int { return (utf8.RuneCountInString(s)+1)/2 + 2 }
@@ -39,10 +42,14 @@ func (l *llama) serve(t *testing.T) string {
 		switch r.URL.Path {
 		case "/tokenize":
 			l.tokenizes++
+			if l.tokenizeStatus != 0 {
+				http.Error(w, "no tokenizer", l.tokenizeStatus)
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"tokens": make([]int, l.count(req.Content))})
 		case "/v1/embeddings":
 			l.inputs = append(l.inputs, req.Input)
-			if n := l.count(req.Input); n > l.window {
+			if n := l.count(req.Input); n > l.window && l.tokenizeStatus == 0 {
 				w.WriteHeader(http.StatusBadRequest)
 				_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{
 					"code": 400, "type": "exceed_context_size_error", "n_prompt_tokens": n, "n_ctx": l.window,
@@ -62,12 +69,13 @@ func (l *llama) serve(t *testing.T) string {
 // overWindow is 600 tokens to the fake tokenizer, within the byte cap.
 var overWindow = strings.Repeat("| control | owner | review cadence |\n", 40)[:1196]
 
-func TestEmbed_OverWindowInputIsCutToFit(t *testing.T) {
+func TestEmbed_SetMaxInputTokensCutsAnOverWindowInput(t *testing.T) {
 	l := &llama{window: 512}
-	e, err := NewEmbedder(context.Background(), l.serve(t), "nomic", 0, 8192, 512, zerolog.Nop())
+	e, err := NewEmbedder(context.Background(), l.serve(t), "nomic", 0, 8192, zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
 	}
+	e.SetMaxInputTokens(512)
 	if _, err := e.EmbedDocument(context.Background(), overWindow); err != nil {
 		t.Fatalf("an over-window input must be cut and accepted: %v", err)
 	}
@@ -78,7 +86,7 @@ func TestEmbed_OverWindowInputIsCutToFit(t *testing.T) {
 
 func TestEmbed_WithoutWindowTheModelRefusesTheInput(t *testing.T) {
 	l := &llama{window: 512}
-	e, err := NewEmbedder(context.Background(), l.serve(t), "nomic", 0, 8192, 0, zerolog.Nop())
+	e, err := NewEmbedder(context.Background(), l.serve(t), "nomic", 0, 8192, zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +101,7 @@ func TestEmbed_WithoutWindowTheModelRefusesTheInput(t *testing.T) {
 
 func TestEmbed_CharCapCutsOnARuneBoundary(t *testing.T) {
 	l := &llama{window: 512}
-	e, err := NewEmbedder(context.Background(), l.serve(t), "nomic", 0, 5, 0, zerolog.Nop())
+	e, err := NewEmbedder(context.Background(), l.serve(t), "nomic", 0, 5, zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,5 +110,24 @@ func TestEmbed_CharCapCutsOnARuneBoundary(t *testing.T) {
 	}
 	if len(l.inputs) != 1 || l.inputs[0] != "аб" {
 		t.Fatalf("sent %q, want the cut before the split rune: %q", l.inputs, "аб")
+	}
+}
+
+// A failed count is not a failed embed: the byte-capped text goes out and the
+// server's answer decides.
+func TestEmbed_WhenTheTokenizerFailsTheByteCappedTextIsSent(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusInternalServerError} {
+		l := &llama{window: 512, tokenizeStatus: status}
+		e, err := NewEmbedder(context.Background(), l.serve(t), "nomic", 0, 1000, zerolog.Nop())
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.SetMaxInputTokens(512)
+		if _, err := e.EmbedDocument(context.Background(), overWindow); err != nil {
+			t.Fatalf("status %d: a tokenizer failure must not fail the embed: %v", status, err)
+		}
+		if len(l.inputs) != 1 || l.inputs[0] != overWindow[:1000] || l.tokenizes != 1 {
+			t.Fatalf("status %d: sent %d inputs after %d tokenize calls; want the 1000-byte cap of the text, once, after one call", status, len(l.inputs), l.tokenizes)
+		}
 	}
 }

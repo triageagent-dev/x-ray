@@ -237,11 +237,11 @@ func (ix *Index) rebuildANNLocked() {
 // maxInputChars hard-caps a node's text before the embed call: set it below the
 // model's token window × ~3.5 so oversized nodes are TRUNCATED here rather than
 // REJECTED by the model (nomic 2048-tok → 8192; bge/MiniLM 512-tok → ~1800).
-// That ratio is a guess and dense text breaks it, so maxInputTokens (the
-// model's window in tokens, 0 = unknown) cuts an input over the window to the
-// longest prefix that fits, counted by the endpoint's tokenizer.
-func NewEmbedder(ctx context.Context, endpoint, model string, dims, maxInputChars, maxInputTokens int, logger zerolog.Logger) (*embedder.Embedder, error) {
-	return embedder.NewEmbedder(ctx, endpoint, model, dims, maxInputChars, maxInputTokens, logger)
+// That ratio is a guess and dense text breaks it, so the returned embedder's
+// SetMaxInputTokens cuts an input over the model's window to the longest prefix
+// that fits, counted by the endpoint's tokenizer.
+func NewEmbedder(ctx context.Context, endpoint, model string, dims, maxInputChars int, logger zerolog.Logger) (*embedder.Embedder, error) {
+	return embedder.NewEmbedder(ctx, endpoint, model, dims, maxInputChars, logger)
 }
 
 // Build embeds every node, reusing cached vectors for unchanged text and only

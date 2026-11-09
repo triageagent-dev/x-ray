@@ -5,17 +5,24 @@
 // is configured, like the embedding dimension, and the tokens are counted by
 // the endpoint's own tokenizer (llama.cpp POST /tokenize), so the cut matches
 // what the model will read.
+//
+// A failed count does not fail the embed: Fit returns the text unchanged with
+// the error, and the caller sends it and lets the server's answer decide. An
+// endpoint without the route answers 404 or 405 (an OpenAI-compatible gateway
+// rather than llama.cpp); that is reported once, and the Cap stops counting.
 package tokencap
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"sort"
 	"strings"
+	"sync/atomic"
 )
 
 // specialTokens is what the embeddings route adds to every input (BOS/EOS).
@@ -27,12 +34,17 @@ const specialTokens = 2
 // thousand rune offsets converges in about 13.
 const maxProbes = 24
 
+// errNoRoute marks a 404 or 405 from POST /tokenize: the endpoint has no
+// tokenizer route, and asking again will not change that.
+var errNoRoute = errors.New("the endpoint has no POST /tokenize")
+
 // Cap fits text to a token window. A nil *Cap, or one with window 0, passes
 // text through unchanged.
 type Cap struct {
 	endpoint string
 	client   *http.Client
 	window   int
+	noRoute  atomic.Bool // set by the first errNoRoute: counting is off for the Cap's lifetime
 }
 
 // New returns a Cap that counts tokens at endpoint's POST /tokenize with
@@ -44,13 +56,21 @@ func New(endpoint string, client *http.Client, window int) *Cap {
 // Fit returns the longest prefix of text, cut on a rune boundary, whose token
 // count is within the window, and text's own token count (0 when text was too
 // short to need counting). The prefix returned was always counted and fit.
+//
+// When a count fails, Fit returns text unchanged with the error, for the
+// caller to send as it is. A 404 or 405 is returned once; after it Fit returns
+// text unchanged with no request and no error. Other failures (transport, 5xx,
+// a malformed answer) are returned every time.
 func (c *Cap) Fit(ctx context.Context, text string) (string, int, error) {
-	if c == nil || c.window <= 0 || len(text)+specialTokens <= c.window {
+	if c == nil || c.window <= 0 || len(text)+specialTokens <= c.window || c.noRoute.Load() {
 		return text, 0, nil
 	}
 	total, err := c.count(ctx, text)
-	if err != nil || total <= c.window {
-		return text, total, err
+	if err != nil {
+		return text, 0, c.failed(err)
+	}
+	if total <= c.window {
+		return text, total, nil
 	}
 	// ends[i] is the byte length of the prefix of i runes.
 	ends := make([]int, 0, len(text)+1)
@@ -66,7 +86,7 @@ func (c *Cap) Fit(ctx context.Context, text string) (string, int, error) {
 		mid = min(max(mid, lo+1), hi-1)
 		n, err := c.count(ctx, text[:ends[mid]])
 		if err != nil {
-			return "", total, err
+			return text, total, c.failed(err)
 		}
 		if n <= c.window {
 			lo, fitted = mid, true
@@ -76,9 +96,19 @@ func (c *Cap) Fit(ctx context.Context, text string) (string, int, error) {
 		mid = (lo + hi) / 2
 	}
 	if !fitted {
-		return "", total, fmt.Errorf("tokenize: no prefix of the input fits the %d-token window", c.window)
+		return text, total, fmt.Errorf("tokenize: no prefix of the input fits the %d-token window", c.window)
 	}
 	return text[:ends[lo]], total, nil
+}
+
+// failed is the error Fit returns for a failed count. The first errNoRoute
+// turns counting off and is returned; one that loses that race is not, so a
+// missing route is reported once.
+func (c *Cap) failed(err error) error {
+	if errors.Is(err, errNoRoute) && !c.noRoute.CompareAndSwap(false, true) {
+		return nil
+	}
+	return err
 }
 
 // count returns the number of tokens the endpoint's tokenizer makes of text,
@@ -101,6 +131,9 @@ func (c *Cap) count(ctx context.Context, text string) (int, error) {
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return 0, fmt.Errorf("read tokenize response: %w", err)
+	}
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
+		return 0, fmt.Errorf("tokenize request failed (status %d): %w; token counting is off for this endpoint", resp.StatusCode, errNoRoute)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return 0, fmt.Errorf("tokenize request failed (status %d): %s", resp.StatusCode, string(raw))

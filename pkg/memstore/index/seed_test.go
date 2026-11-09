@@ -34,7 +34,7 @@ func failingGateway(t *testing.T, dims int) *Embedder {
 		http.Error(w, "embedder down", http.StatusServiceUnavailable)
 	}))
 	t.Cleanup(srv.Close)
-	e, err := NewEmbedder(context.Background(), srv.URL, "m", "", "", dims, 0, 0, zerolog.Nop())
+	e, err := NewEmbedder(context.Background(), srv.URL, "m", "", "", dims, 0, zerolog.Nop())
 	require.NoError(t, err)
 	return e
 }
@@ -109,7 +109,7 @@ func TestSeedOrEmbed_AStoredEmbeddingOfAnotherTextOrWithoutAFingerprintIsReEmbed
 
 func TestEmbeddingFingerprint_FollowsTheTextTheModelTheDimensionAndTheVector(t *testing.T) {
 	newStore := func(model string, dims int) *CellStore {
-		e, err := NewEmbedder(context.Background(), "http://unused", model, "", "", dims, 0, 0, zerolog.Nop())
+		e, err := NewEmbedder(context.Background(), "http://unused", model, "", "", dims, 0, zerolog.Nop())
 		require.NoError(t, err)
 		return NewCellStore(e, zerolog.Nop())
 	}
