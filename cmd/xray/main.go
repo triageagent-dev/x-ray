@@ -72,6 +72,7 @@ func main() {
 		embedModel                string
 		embedDims                 int
 		embedMaxInputChars        int
+		embedMaxInputTokens       int
 		semanticScoreGap          float64
 		searchLexicalShortCircuit bool
 		searchRecallShaping       bool
@@ -132,12 +133,13 @@ func main() {
 	flag.StringVar(&embedEndpoint, "embedding-endpoint", "", "OpenAI-compatible embedding endpoint (enables HNSW semantic memory)")
 	flag.StringVar(&embedModel, "embedding-model", "gemini-embedding-001", "Embedding model name")
 	flag.IntVar(&embedDims, "embedding-dims", 128, "Reduced output dimensionality (Vertex AI native, or gateway via OpenAI \"dimensions\" param for MRL models; 0 = model default)")
-	flag.IntVar(&embedMaxInputChars, "embedding-max-input-chars", 0, "Hard cap on embed input length in chars before the API call (0 = default 8000, ~2000 tokens). Set below the model's token window × ~4 for small-context gateway/sidecar models to avoid status-400 rejections.")
+	flag.IntVar(&embedMaxInputChars, "embedding-max-input-chars", 0, "Hard cap on embed input length in chars before the API call (0 = default 8000, ~2000 tokens). Set below the model's token window × ~4 for small-context gateway/sidecar models; bytes per token vary with the text, so this is a bound, and --embedding-max-input-tokens is the fit.")
+	flag.IntVar(&embedMaxInputTokens, "embedding-max-input-tokens", 0, "The gateway model's input window in tokens (0 = unknown); an input over it is cut to the longest prefix that fits, counted by the endpoint's own tokenizer (llama.cpp POST /tokenize). nomic-embed-text-v2-moe reads 512.")
 	flag.Float64Var(&semanticScoreGap, "semantic-score-gap", 0, "Semantic relevance cutoff: drop results more than this absolute cosine gap below the top hit (0, the default, disables the cutoff; 0.02 was the previous default)")
 	flag.BoolVar(&searchRecallShaping, "search-recall-shaping", true, "Collapse near-duplicate facts in Search results and re-rank by state (an active watch_item first, a mild recency decay); false returns the fused order unchanged")
 	flag.BoolVar(&memoryWriteDedup, "memory-write-dedup", true, "Land an upsert that restates a stable_fact, operational_pattern, watch_item or hypothesis on the cell it repeats instead of minting a second one")
 	flag.BoolVar(&searchLexicalShortCircuit, "search-lexical-shortcircuit", false, "Let a full-coverage keyword hit short-circuit Search and skip semantic retrieval (previous behaviour); default false always fuses keyword and semantic results by RRF")
-	flag.StringVar(&memMapsDir, "mental-maps-dir", "", "Directory of *.graph.gob.gz mental maps (code, service, or other graphs) to serve as NATIVE voice tools (search_graph etc.; ADR-045; empty = off). Requires --embedding-endpoint; --embedding-dims/--embedding-max-input-chars must match the maps' fingerprint.")
+	flag.StringVar(&memMapsDir, "mental-maps-dir", "", "Directory of *.graph.gob.gz mental maps (code, service, or other graphs) to serve as NATIVE voice tools (search_graph etc.; ADR-045; empty = off). Requires --embedding-endpoint; --embedding-dims/--embedding-max-input-chars/--embedding-max-input-tokens must match the maps' fingerprint.")
 	flag.IntVar(&memMapsRouteFanout, "mental-maps-route-fanout", 1, "Number of maps a semantic (no explicit map) graph search consults")
 	flag.StringVar(&memMapsKeyFile, "mental-maps-snapshot-key", "", "age identity file (from `xray graph keygen`) that opens encrypted snapshots in --mental-maps-dir; a map read encrypted stays encrypted when flushed. Default $XRAY_SNAPSHOT_KEY")
 	flag.IntVar(&memMapsTTLMin, "mental-maps-ttl-min", 0, "Evict a map's in-memory graph after this many idle MINUTES (0 = never; reloads from the .gob on next use)")
@@ -285,6 +287,7 @@ func main() {
 			log.Warn().Err(err).Msg("embedding init failed — using keyword memory")
 			memory = xray.NewMemoryStore()
 		} else {
+			embedder.SetMaxInputTokens(embedMaxInputTokens)
 			log.Info().Str("endpoint", embedEndpoint).Str("project", gcpProject).Str("model", embedModel).Float64("score_gap", semanticScoreGap).Bool("lexical_shortcircuit", searchLexicalShortCircuit).Msg("HNSW semantic memory enabled")
 			memory = xray.NewMemoryStoreWithEmbedder(embedder, logger)
 			memory.SetSemanticScoreGap(float32(semanticScoreGap))
@@ -319,7 +322,7 @@ func main() {
 	if memMapsDir != "" {
 		if embedEndpoint == "" {
 			log.Error().Msg("--mental-maps-dir set but --embedding-endpoint is empty; code-graph tools disabled")
-		} else if deps := loadMemsnapGraph(memMapsDir, memMapsKeyFile, embedEndpoint, embedModel, embedDims, embedMaxInputChars, memMapsRouteFanout, memMapsTTLMin, logger); deps != nil {
+		} else if deps := loadMemsnapGraph(memMapsDir, memMapsKeyFile, embedEndpoint, embedModel, embedDims, embedMaxInputChars, embedMaxInputTokens, memMapsRouteFanout, memMapsTTLMin, logger); deps != nil {
 			memMapsDeps = deps
 		}
 	}
@@ -692,13 +695,14 @@ func registerCellIndexes(mgr ctrl.Manager) error {
 // returns graphmcp.Deps for the NATIVE voice tools (no MCP). Returns nil (and logs)
 // on any failure — the caller continues without code tools, so a snapshot problem
 // can never crash the server. Snapshots are rebuilt offline by the CGO build of this binary.
-func loadMemsnapGraph(dir, keyFile, embedEndpoint, embedModel string, embedDims, embedMaxInputChars, fanout, ttlMin int, logger zerolog.Logger) *graphmcp.Deps {
+func loadMemsnapGraph(dir, keyFile, embedEndpoint, embedModel string, embedDims, embedMaxInputChars, embedMaxInputTokens, fanout, ttlMin int, logger zerolog.Logger) *graphmcp.Deps {
 	emb, err := msindex.NewEmbedder(context.Background(), embedEndpoint, embedModel, embedDims, embedMaxInputChars, logger)
 	if err != nil {
 		log.Error().Err(err).Msg("code-graph embedder init failed; code tools disabled")
 		return nil
 	}
-	fp := msengine.EmbedFingerprint{Model: embedModel, Dims: embedDims, MaxInputChars: embedMaxInputChars}
+	emb.SetMaxInputTokens(embedMaxInputTokens)
+	fp := msengine.EmbedFingerprint{Model: embedModel, Dims: embedDims, MaxInputChars: embedMaxInputChars, MaxInputTokens: embedMaxInputTokens}
 	reg := msengine.NewRegistry(emb, fp, fanout, time.Duration(ttlMin)*time.Minute, false, logger)
 	if keyFile == "" {
 		keyFile = os.Getenv("XRAY_SNAPSHOT_KEY")

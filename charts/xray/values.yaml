@@ -75,6 +75,8 @@ args:
   - --embedding-model=nomic-embed-text
   - --embedding-dims=256
   - --embedding-max-input-chars=8192
+  # - --embedding-max-input-tokens=2048   # the sidecar model's window in tokens; an input over it is cut to fit.
+  #   Set it for a small-window model (512 for nomic-embed-text-v2-moe); maps must be built with the same value.
   - --mental-maps-dir=/snapshots
   - --episodic-ttl=168h
   - --max-request-bytes=1048576

@@ -134,7 +134,7 @@ A map is a pre-built graph saved as `<name>.graph.gob.gz` with its HNSW index. L
 - **Carried in a cell.** A cell holds the gob in `data.graph`. The cell syncer decodes it and registers the map, and skips the work when the bytes are unchanged.
 - **Pulled from a registry.** A cell holds a digest-pinned OCI reference in `data.graphRef` (plain text, `name@sha256:...`), for a map too large for a cell (about 480 nodes). The server pulls the image, takes its one `*.graph.gob.gz` file and registers the map, once per reference, and retries every 30 seconds while the registry is unreachable. A tag is refused. `--registry-pull-secret` names a `dockerconfigjson` Secret for a private registry. The same key the Triage core reads.
 
-Snapshots must match the server's embedding fingerprint: the model, `--embedding-dims` and `--embedding-max-input-chars`.
+Snapshots must match the server's embedding fingerprint: the model, `--embedding-dims`, `--embedding-max-input-chars` and `--embedding-max-input-tokens`.
 
 ## Recall
 
@@ -148,7 +148,7 @@ The score is a bonus for the whole query in the title, a graded match per token 
 
 ### Semantic rank
 
-The query is embedded and compared to the HNSW index by cosine similarity. The default model is `gemini-embedding-001` at 128 dimensions, from Vertex AI (`--gcp-project`) or any OpenAI-compatible endpoint (`--embedding-endpoint`). Input is cut to 8000 characters unless `--embedding-max-input-chars` says otherwise. `--semantic-score-gap` drops results more than a given cosine gap below the top hit.
+The query is embedded and compared to the HNSW index by cosine similarity. The default model is `gemini-embedding-001` at 128 dimensions, from Vertex AI (`--gcp-project`) or any OpenAI-compatible endpoint (`--embedding-endpoint`). Input is cut to 8000 bytes unless `--embedding-max-input-chars` says otherwise. That is a bound, not a fit: bytes per token vary with the text, and a dense input under it can still exceed the model's window. `--embedding-max-input-tokens` is the window (0, the default, means unknown; nomic-embed-text-v2-moe reads 512): an input over it is cut, when it is sent, to the longest prefix that fits, counted by the endpoint's own tokenizer (llama.cpp `POST /tokenize`), because llama.cpp refuses an over-window input instead of truncating it. Text with fewer bytes than the window is never counted. When the endpoint cannot count (an OpenAI-compatible gateway with no `/tokenize`, or a failing tokenizer), the byte-capped text is sent with a warning and the server's answer decides; a 404 or 405 from `/tokenize` turns counting off for the life of the process. Vertex AI truncates on its side and ignores the flag. `--semantic-score-gap` drops results more than a given cosine gap below the top hit.
 
 A cell is embedded as its kind, scope, subject, title and content joined by spaces, cut to 1800 bytes on a character boundary (the batch limit of a local embedder is 2048 tokens, and a longer input is rejected outright). The store knows its embedding dimension and refuses a vector or a query of another length. If a search's whole top window is rejected on lookup, because every hit is a cell deleted or retired on another replica and still indexed here, the search ranks every cell exactly instead, so the cells that qualify are not starved. The embedding and index phases of each semantic search are reported separately as `xray.memory.search.phase.duration`.
 
@@ -489,10 +489,10 @@ Flags set the baseline. The configuration cell and the chart's `values.yaml` ove
 | Group | Flags |
 |---|---|
 | Listeners | `--http-address` :8080, `--mcp-address` :8083, `--metrics-address` :9090, `--namespace` xray, `--log-level` info |
-| Embeddings | `--embedding-endpoint`, `--embedding-model` gemini-embedding-001, `--embedding-dims` 128, `--embedding-max-input-chars`, `--gcp-project`, `--gcp-location` europe-west4, `--semantic-score-gap` |
+| Embeddings | `--embedding-endpoint`, `--embedding-model` gemini-embedding-001, `--embedding-dims` 128, `--embedding-max-input-chars`, `--embedding-max-input-tokens` 0, `--gcp-project`, `--gcp-location` europe-west4, `--semantic-score-gap` |
 | Search | `--search-lexical-shortcircuit`, `--search-recall-shaping` true, `--memory-write-dedup` true, `--headroom-content-limit`, `--mcp-search-memory-max-limit`, `--mcp-list-memory-max-limit`, `--mcp-recent-memory-max-limit` |
 | Maps | `--mental-maps-dir`, `--mental-maps-snapshot-key`, `--registry-pull-secret`, `--mental-maps-route-fanout` 1, `--mental-maps-ttl-min` 0 |
-| Graph server | `xray graph serve-snapshots`: `-snapshot-dir`, `-addr` 127.0.0.1:8085, `-writable`, `-memory-map` session, `-memory-ttl` 7d, `-skills-map` skills, `-graph-ttl-min` 0, `-route-fanout` 1, `-embedding-endpoint` http://localhost:8090, `-embedding-model` nomic, `-embedding-dims` 256, `-embedding-max-input-chars` 8192, `-snapshot-key`, `-auth-token-file`, `-allowed-hosts`, `-allowed-origins`. `serve` takes `-repo` and listens on 127.0.0.1:8084 |
+| Graph server | `xray graph serve-snapshots`: `-snapshot-dir`, `-addr` 127.0.0.1:8085, `-writable`, `-memory-map` session, `-memory-ttl` 7d, `-skills-map` skills, `-graph-ttl-min` 0, `-route-fanout` 1, `-embedding-endpoint` http://localhost:8090, `-embedding-model` nomic, `-embedding-dims` 256, `-embedding-max-input-chars` 8192, `-embedding-max-input-tokens` 0, `-snapshot-key`, `-auth-token-file`, `-allowed-hosts`, `-allowed-origins`. `serve` takes `-repo` and listens on 127.0.0.1:8084 |
 | Voice | `--gemini-api-key`, `--voice-model`, `--voice-location`, `--voice-name`, `--user-daily-audio-token-limit`, `--max-concurrent-voice`, `--voice-max-output-tokens`, `--voice-affective-dialog`, `--voice-proactive-audio` |
 | Sign-in and MCP | `--public-url`, `--github-client-id`, `--github-client-secret`, `--github-org`, `--github-team`, `--azure-client-id`, `--azure-client-secret`, `--azure-tenant-id`, `--google-client-id`, `--google-client-secret`, `--google-domain`, `--ui-callback-origins`, `--mcp-token-secret`, `--mcp-oauth`, `--mcp-resource-url`, `--mcp-token-ttl` 15m, `--dev` |
 | Retention | `--episodic-ttl` 168h, `--retention-sweep-interval` 1h |
