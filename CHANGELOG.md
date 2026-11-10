@@ -2,8 +2,15 @@
 
 ## [Unreleased]
 
+## [2.9.0] - 2026-11-10
+
 ### Added
+- **`--otel-service-name` sets the `service.name` of an instance's spans (#72).** Every instance sent its spans as `xray`, so a trace backend that routes by service name treated all instances alike, and `--otel-project` sets only the openinference project. The flag defaults to `xray`, so nothing changes unless it is set. Prometheus metrics are pulled per target and keep `xray`.
 - **Voice sessions can compress their context, behind `--voice-context-trigger-tokens` (default 0, off; ADR-039).** Resumption keeps a session alive across the connection recycle, but Gemini Live also limits audio-only sessions to 15 minutes unless the context is compressed. With a trigger set (5000-128000 tokens), the server asks Gemini for a sliding window: once the context passes the trigger the oldest turns are dropped, never the system instruction. `--voice-context-target-tokens` (below the trigger; 0 leaves it to the server, half the trigger) is the size it is cut to. The pair can also be set per instance with `contextTriggerTokens` and `contextTargetTokens` in the configuration cell's `voiceConfig`, and the chart sets it with `voice.contextTriggerTokens` and `voice.contextTargetTokens`. A pair that fails the check stops the server at startup; one in the cell is logged and ignored. A resumed connection keeps the compression. The `MemoryCell` CRD gains two fields; Helm does not upgrade CRDs, so apply `charts/xray/crds/` before setting them.
+
+### Fixed
+- **A recall lights the tagged region it belongs to (#69).** When a kind is split into categories by tag (ADR-035), a hit lit only the kind's bare region. A hit event now carries the tags of shared items, re-read from the store (a private item carries none, and the query is still never sent), and the graph places a hit by its kind and tags. An older server sends no tags and hits are placed by kind alone.
+- Synapse lines in the graph are thin and faint at rest and take the full style on hover, so a dense store does not bury the regions. The stats text in the graph's corner scales with the screen (11-20 px) instead of a fixed 10 px.
 
 ## [2.8.0] - 2026-11-09
 
