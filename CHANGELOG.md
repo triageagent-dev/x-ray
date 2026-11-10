@@ -3,7 +3,11 @@
 ## [Unreleased]
 
 ### Added
+- **The server can run under a path of a shared host: a path in `--public-url` (`https://gw.example.com/path`) mounts it there (ADR-064, #68).** X-Ray assumed it owned the host root, so behind a proxy that routes one path to it, redirects, the PWA and the cookies went to the root, and the session cookie reached every other service on the host. With a path, the server serves under it, and the login and logout redirects, the session and state cookies, the PWA manifest and the service worker stay under it. The OAuth metadata is also served at the host root with the path inserted (RFC 8414, RFC 9728), where MCP clients look first; route those two paths to X-Ray as well. The proxy forwards the path unchanged. `make build BASE_PATH=/path` builds the UI for it, and an image is bound to the path it was built for (the server warns at startup if they differ). Without a path nothing changes.
 - **Voice sessions can compress their context, behind `--voice-context-trigger-tokens` (default 0, off; ADR-039).** Resumption keeps a session alive across the connection recycle, but Gemini Live also limits audio-only sessions to 15 minutes unless the context is compressed. With a trigger set (5000-128000 tokens), the server asks Gemini for a sliding window: once the context passes the trigger the oldest turns are dropped, never the system instruction. `--voice-context-target-tokens` (below the trigger; 0 leaves it to the server, half the trigger) is the size it is cut to. The pair can also be set per instance with `contextTriggerTokens` and `contextTargetTokens` in the configuration cell's `voiceConfig`, and the chart sets it with `voice.contextTriggerTokens` and `voice.contextTargetTokens`. A pair that fails the check stops the server at startup; one in the cell is logged and ignored. A resumed connection keeps the compression. The `MemoryCell` CRD gains two fields; Helm does not upgrade CRDs, so apply `charts/xray/crds/` before setting them.
+
+### Changed
+- The CORS and voice WebSocket origin check use the scheme and host of `--public-url`, which is all a browser sends as `Origin`, so a trailing slash or a path no longer breaks them. The service worker starts with an empty `BASE` constant at the host root.
 
 ## [2.8.0] - 2026-11-09
 
