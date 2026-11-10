@@ -106,6 +106,7 @@ func main() {
 		otelTokenSecret           string
 		registryPullSecret        string
 		otelProject               string
+		otelServiceName           string
 		githubClientID            string
 		githubClientSecret        string
 		githubOrg                 string
@@ -170,6 +171,7 @@ func main() {
 	flag.StringVar(&registryPullSecret, "registry-pull-secret", "", "k8s dockerconfigjson Secret (in --namespace) with the registry credentials for pulling a mental_map cell's graphRef artifact; empty = the process's docker config (anonymous in a pod)")
 	flag.StringVar(&otelTokenSecret, "otel-token-secret", "", "k8s Secret name containing the bearer token for the OTLP endpoint (key: token)")
 	flag.StringVar(&otelProject, "otel-project", "", "openinference.project.name attribute sent with every span")
+	flag.StringVar(&otelServiceName, "otel-service-name", "xray", "service.name attribute sent with every span; give each instance its own to tell them apart")
 	flag.StringVar(&githubClientID, "github-client-id", "", "GitHub OAuth App client ID")
 	flag.StringVar(&githubClientSecret, "github-client-secret", "", "GitHub OAuth App client secret")
 	flag.StringVar(&githubOrg, "github-org", "", "Required GitHub org for access")
@@ -286,7 +288,7 @@ func main() {
 	}
 
 	otelToken := &observability.BearerToken{}
-	if err := observability.ConfigureOTel(context.Background(), otelEndpoint, otelProject, otelToken, logger); err != nil {
+	if err := observability.ConfigureOTel(context.Background(), otelEndpoint, otelServiceName, otelProject, otelToken, logger); err != nil {
 		log.Warn().Err(err).Msg("otel tracing init failed — continuing without tracing")
 	}
 

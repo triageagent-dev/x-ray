@@ -42,6 +42,11 @@ type HitEvent struct {
 	// absent or shorter than ItemIDs must fall back to behaviour that needs no
 	// kind.
 	Kinds []string `json:"kinds,omitempty"`
+	// Tags is the tags of each item, parallel to ItemIDs and empty for a private
+	// item, so a client can place a hit in a category a deployment split off its
+	// kind by tag (ADR-035). A client that finds it absent or shorter than ItemIDs
+	// places hits by kind alone.
+	Tags [][]string `json:"tags,omitempty"`
 }
 
 // ChangeEvent reports that an item was created, updated or deleted.

@@ -51,7 +51,8 @@ A single source of truth, `ui/lib/category-config.ts`, defines a
 
 No backend change: the cells already carry the tags (since then the graph preview's
 cap and its counts are per category on the server, so a kind split by tag is capped
-and counted per category: `/v1/memory/summary` `totalsByCategory`). Privacy is unaffected —
+and counted per category: `/v1/memory/summary` `totalsByCategory`; and a hit event carries the tags of
+each shared item, so a recall pulses the tagged region it belongs to). Privacy is unaffected —
 Notes are private (`scope`-gated, served via `/v1/user/notes`), orthogonal to the
 category mapping (ADR-037).
 

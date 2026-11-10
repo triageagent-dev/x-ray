@@ -265,11 +265,11 @@ The memory routes are read-only. Writes arrive by MCP, by voice, or as objects a
 
 ### Live events
 
-`GET /v1/memory/events` carries two event types: a *hit* (the item ids, query and kinds of a recall that just ran) and a *change* (an upsert or delete). A recall publishes a hit when it is made by `search_memory` or `get_memory_context` over MCP, or by the voice search and list tools. Private items are never named: a hit lists the shared items a search returned, and a private change goes only to its owner. A client connected to one replica sees the events of that replica ([Replicas](#replicas)).
+`GET /v1/memory/events` carries two event types: a *hit* (the item ids, query, kinds and, for shared items, tags of a recall that just ran) and a *change* (an upsert or delete). A recall publishes a hit when it is made by `search_memory` or `get_memory_context` over MCP, or by the voice search and list tools. Private items are never named: a hit lists the shared items a search returned, and a private change goes only to its owner. A client connected to one replica sees the events of that replica ([Replicas](#replicas)).
 
 ### How a recall shows up
 
-The web UI turns a hit into light, the way optogenetics does: a neuron made to carry a light-gated channel fires when blue light reaches it. The kinds in the event name the region, so a blue fibre lights it even when the recalled cell is not one of the nodes drawn. The cells in the region wash blue in the order the light reaches them, nearest the fibre first. The recalled cells fire hardest, with a double flare, three spike rings and an afterglow of a few seconds. A pulse of light then runs from each recalled cell along its links to the memories it connects to. It is laid over the category-coloured flash the graph already draws, and a repeat hit fires again. The region treatment is one fast attack and a smooth decay, about two pulses a second at most, because flicker over a large area is a photosensitivity risk; reduced motion gets one slow wash. The embedded web UI listens to this stream; a Triage deployment carries the same events over a WebSocket.
+The web UI turns a hit into light, the way optogenetics does: a neuron made to carry a light-gated channel fires when blue light reaches it. The kinds in the event, and the tags for a kind split by tag (ADR-035), name the region, so a blue fibre lights it even when the recalled cell is not one of the nodes drawn. The cells in the region wash blue in the order the light reaches them, nearest the fibre first. The recalled cells fire hardest, with a double flare, three spike rings and an afterglow of a few seconds. A pulse of light then runs from each recalled cell along its links to the memories it connects to. It is laid over the category-coloured flash the graph already draws, and a repeat hit fires again. The region treatment is one fast attack and a smooth decay, about two pulses a second at most, because flicker over a large area is a photosensitivity risk; reduced motion gets one slow wash. The embedded web UI listens to this stream; a Triage deployment carries the same events over a WebSocket.
 
 ## Access
 
@@ -507,7 +507,7 @@ Flags set the baseline. The configuration cell and the chart's `values.yaml` ove
 | Sign-in and MCP | `--public-url`, `--github-client-id`, `--github-client-secret`, `--github-org`, `--github-team`, `--azure-client-id`, `--azure-client-secret`, `--azure-tenant-id`, `--google-client-id`, `--google-client-secret`, `--google-domain`, `--ui-callback-origins`, `--mcp-token-secret`, `--mcp-oauth`, `--mcp-resource-url`, `--mcp-token-ttl` 15m, `--dev` |
 | Retention | `--episodic-ttl` 168h, `--retention-sweep-interval` 1h |
 | Requests | `--max-request-bytes` 1 MiB, `--trusted-proxy-hops` 0 |
-| Tracing | `--otel-endpoint`, `--otel-project`, `--otel-token-secret` |
+| Tracing | `--otel-endpoint`, `--otel-project`, `--otel-service-name` (default `xray`; one per instance tells instances apart), `--otel-token-secret` |
 
 ### Chart
 
