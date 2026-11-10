@@ -507,7 +507,7 @@ Flags set the baseline. The configuration cell and the chart's `values.yaml` ove
 | Sign-in and MCP | `--public-url`, `--github-client-id`, `--github-client-secret`, `--github-org`, `--github-team`, `--azure-client-id`, `--azure-client-secret`, `--azure-tenant-id`, `--google-client-id`, `--google-client-secret`, `--google-domain`, `--ui-callback-origins`, `--mcp-token-secret`, `--mcp-oauth`, `--mcp-resource-url`, `--mcp-token-ttl` 15m, `--dev` |
 | Retention | `--episodic-ttl` 168h, `--retention-sweep-interval` 1h |
 | Requests | `--max-request-bytes` 1 MiB, `--trusted-proxy-hops` 0 |
-| Tracing | `--otel-endpoint`, `--otel-project`, `--otel-token-secret` |
+| Tracing | `--otel-endpoint`, `--otel-project`, `--otel-service-name` (default `xray`; one per instance tells instances apart), `--otel-token-secret` |
 
 ### Chart
 

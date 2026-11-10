@@ -105,6 +105,7 @@ args:
   # Tracing (OTLP over gRPC, usually port 4317):
   # - --otel-endpoint=http://collector.example.svc:4317
   # - --otel-project=xray
+  # - --otel-service-name=xray
   # - --otel-token-secret=otlp-token   # Secret in this namespace, key "token", sent as a bearer header
   #
   # A UI on another host that signs in against this API: each listed origin may
