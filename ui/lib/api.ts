@@ -39,6 +39,10 @@ export interface MemoryHitEvent {
   // never sends this field leaves it undefined, and hitKindMap below
   // degrades that to "no per-item kind info" rather than throwing.
   kinds?: string[]
+  // Per-item tags, parallel to itemIds (null for a private item), so the
+  // graph can place a hit in a category a deployment split off its kind by
+  // tag (ADR-035). Absent from an older server; hitTagMap degrades to kind.
+  tags?: (string[] | null)[]
 }
 
 /**
@@ -52,6 +56,18 @@ export function hitKindMap(evt: MemoryHitEvent | null | undefined): Map<string, 
   if (!evt?.itemIds?.length || !evt.kinds || evt.kinds.length < evt.itemIds.length) return undefined
   const m = new Map<string, string>()
   evt.itemIds.forEach((id, i) => m.set(id, evt.kinds![i]))
+  return m
+}
+
+/**
+ * Maps each hit item ID to its tags, given a HitEvent's parallel `tags` array.
+ * Undefined when `tags` is absent or shorter than `itemIds` (an older server):
+ * callers then place hits by kind alone.
+ */
+export function hitTagMap(evt: MemoryHitEvent | null | undefined): Map<string, string[]> | undefined {
+  if (!evt?.itemIds?.length || !evt.tags || evt.tags.length < evt.itemIds.length) return undefined
+  const m = new Map<string, string[]>()
+  evt.itemIds.forEach((id, i) => m.set(id, evt.tags![i] ?? []))
   return m
 }
 
@@ -519,9 +535,9 @@ const RECONNECT_MAX_MS = 30_000
 // Upserts are gated on the selected tenant here, at the one point every
 // subscriber shares, for the same reason ?tenant= is added inside apiFetch:
 // a consumer added later cannot forget it. Deletes carry only an id and pass
-// through — an id the view never held is a no-op — and hits are ids too, with
-// nothing to filter on; a hit for a cell the graph does not show matches
-// nothing.
+// through — an id the view never held is a no-op — and hits name ids, kinds
+// and tags with nothing to filter on; a hit for a cell the graph does not show
+// matches nothing.
 function fanOut(data: { op?: string; item?: MemoryItem } & Record<string, unknown>) {
   if (data.op) {
     if (data.op === "upsert" && data.item) {

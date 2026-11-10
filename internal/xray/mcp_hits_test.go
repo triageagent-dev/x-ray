@@ -20,7 +20,7 @@ import (
 func TestMCPSearchMemory_PublishesAHitForTheSharedItemsItReturns(t *testing.T) {
 	store := newTestStore()
 	ctx := context.Background()
-	_, msg := store.Upsert(ctx, "pub-1", "operational_pattern", "public", "Retry policy", "payments retries failures three times", "me", "", "", nil, nil)
+	_, msg := store.Upsert(ctx, "pub-1", "operational_pattern", "public", "Retry policy", "payments retries failures three times", "me", "", "", nil, []string{"area:payments"})
 	require.Empty(t, msg)
 	_, msg = store.Upsert(ctx, "priv-1", "note", "private", "My retry note", "payments retries are my own business", "me", "", "", nil, nil)
 	require.Empty(t, msg)
@@ -52,8 +52,50 @@ func TestMCPSearchMemory_PublishesAHitForTheSharedItemsItReturns(t *testing.T) {
 		require.NoError(t, json.Unmarshal(f.Data, &hit))
 		assert.Equal(t, []string{"pub-1"}, hit.ItemIDs, "the private item is returned to its owner but never named on the stream")
 		assert.Equal(t, []string{"operational_pattern"}, hit.Kinds)
+		assert.Equal(t, [][]string{{"area:payments"}}, hit.Tags, "tags place the hit in a category split off its kind by tag")
 		assert.Empty(t, hit.Query, "the stream reaches every client and does not carry what was asked")
 	case <-time.After(3 * time.Second):
 		t.Fatal("no hit event for a recall")
+	}
+}
+
+func TestMemoryStore_PublishHit_TagsOnlyForSharedItems(t *testing.T) {
+	store := newTestStore()
+	ctx := context.Background()
+	_, msg := store.Upsert(ctx, "pub-1", "policy", "public", "Shared", "shared body", "me", "", "", nil, []string{"area:a"})
+	require.Empty(t, msg)
+	_, msg = store.Upsert(ctx, "priv-1", "note", "private", "Mine", "private body", "me", "", "", nil, []string{"secret-topic"})
+	require.Empty(t, msg)
+
+	events, stop := store.hub.Subscribe("")
+	defer stop()
+	// Voice's pinned fetch names its caller's own private items too; their tags stay off the shared stream.
+	store.PublishHit([]string{"pub-1", "priv-1", "gone"}, "", []string{"policy", "note", "policy"})
+
+	select {
+	case f := <-events:
+		var hit MemoryHitEvent
+		require.NoError(t, json.Unmarshal(f.Data, &hit))
+		assert.Equal(t, [][]string{{"area:a"}, nil, nil}, hit.Tags)
+	case <-time.After(3 * time.Second):
+		t.Fatal("no hit event")
+	}
+}
+
+func TestMemoryStore_PublishHit_NoTagsLeavesTheEventAsItWas(t *testing.T) {
+	store := newTestStore()
+	ctx := context.Background()
+	_, msg := store.Upsert(ctx, "plain-1", "policy", "public", "Plain", "no tags", "me", "", "", nil, nil)
+	require.Empty(t, msg)
+
+	events, stop := store.hub.Subscribe("")
+	defer stop()
+	store.PublishHit([]string{"plain-1"}, "", []string{"policy"})
+
+	select {
+	case f := <-events:
+		assert.NotContains(t, string(f.Data), `"tags"`, "a store without tags sends the event without the field")
+	case <-time.After(3 * time.Second):
+		t.Fatal("no hit event")
 	}
 }
