@@ -791,6 +791,34 @@ type RefutedRecord struct {
 // cascaded. It returns whether the cell existed and the ids expired as a
 // consequence.
 func (s *Store) Refute(id, reason string, evidence []string, now time.Time) (refuted bool, cascaded []string) {
+	return s.refute(id, reason, evidence, now, true)
+}
+
+// CountPrivateOwned counts the private cells owned by userHash in any status
+// (a retired cell stays in the store until deleted), in one pass.
+func (s *Store) CountPrivateOwned(userHash string) int {
+	if userHash == "" {
+		return 0
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	n := 0
+	for _, it := range s.cells {
+		if IsPrivateItem(it) && PrivateOwner(it) == userHash {
+			n++
+		}
+	}
+	return n
+}
+
+// RefuteOnly is Refute without the cascade: only the named cell is retired, so
+// a caller that owns that cell alone cannot retire cells that cite it.
+func (s *Store) RefuteOnly(id, reason string, evidence []string, now time.Time) bool {
+	refuted, _ := s.refute(id, reason, evidence, now, false)
+	return refuted
+}
+
+func (s *Store) refute(id, reason string, evidence []string, now time.Time, cascade bool) (refuted bool, cascaded []string) {
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return false, nil
@@ -816,7 +844,7 @@ func (s *Store) Refute(id, reason string, evidence []string, now time.Time) (ref
 	}
 	var hits []string
 	for cid, c := range s.cells {
-		if cid == id || !c.IsActive() || c.Origin != OriginDerived {
+		if !cascade || cid == id || !c.IsActive() || c.Origin != OriginDerived {
 			continue
 		}
 		if citesCell(c, id) {

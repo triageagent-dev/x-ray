@@ -29,6 +29,8 @@ import (
 const (
 	scopeRead  = "xray:memory.read"
 	scopeWrite = "xray:memory.write"
+	// scopeWriteOwn lets a member write private notes of their own only (ADR 067).
+	scopeWriteOwn = "xray:memory.write.own"
 )
 
 // allMCPScopes is what the authorization server advertises and what a fully
@@ -185,6 +187,10 @@ type mcpAuthorizer struct {
 	// DCR client registrations live in the package-level oauthClients store (not a
 	// field here) so they can be restored from CR status before this authorizer is
 	// even constructed — see oauthClientStore. ADR-049.
+
+	// memberAccess (--mcp-member-access) lets a signed-in non-admin have a token
+	// with the member scopes instead of being denied. Off by default (ADR 067).
+	memberAccess bool
 }
 
 // authCode is a single-use OAuth authorization code bound to a PKCE challenge,
@@ -280,6 +286,19 @@ func (a *mcpAuthorizer) SetAllowFn(fn func() []string) {
 	}
 }
 
+// SetMemberAccess turns on member tokens for signed-in non-admins (ADR 067).
+// Call before serving.
+func (a *mcpAuthorizer) SetMemberAccess(on bool) { a.memberAccess = on }
+
+// advertisedScopes is what the discovery metadata and the 401 challenge list:
+// the admin scopes, plus the member scope only when member access is on.
+func (a *mcpAuthorizer) advertisedScopes() []string {
+	if a.memberAccess {
+		return []string{scopeRead, scopeWrite, scopeWriteOwn}
+	}
+	return allMCPScopes
+}
+
 // isMCPAllowed reports whether a user may use the MCP interface at all. MCP is
 // admin-only: read access is privileged (search/get can retrieve any user's
 // private notes by subject), so a user not on the allowlist gets no access. The
@@ -311,7 +330,7 @@ func (a *mcpAuthorizer) protectedResourceMetadata(w http.ResponseWriter, _ *http
 	writeJSON(w, map[string]any{
 		"resource":                 a.resource,
 		"authorization_servers":    []string{a.issuer},
-		"scopes_supported":         allMCPScopes,
+		"scopes_supported":         a.advertisedScopes(),
 		"bearer_methods_supported": []string{"header"},
 	})
 }
@@ -324,7 +343,7 @@ func (a *mcpAuthorizer) authServerMetadata(w http.ResponseWriter, _ *http.Reques
 		"token_endpoint":                        a.issuer + "/token",
 		"registration_endpoint":                 a.issuer + "/register",
 		"jwks_uri":                              a.issuer + "/.well-known/jwks.json",
-		"scopes_supported":                      allMCPScopes,
+		"scopes_supported":                      a.advertisedScopes(),
 		"response_types_supported":              []string{"code"},
 		"grant_types_supported":                 []string{"authorization_code"},
 		"code_challenge_methods_supported":      []string{"S256"},
@@ -570,7 +589,8 @@ func (a *mcpAuthorizer) handleAuthorize(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// MCP is admin-only. A logged-in but non-allowlisted user is denied a token
+	// MCP is admin-only unless --mcp-member-access is on (then a non-admin gets the
+	// member scopes below). A logged-in but non-allowlisted user is denied a token
 	// (OAuth 2.0 access_denied per RFC 6749 §4.1.2.1) rather than issued an
 	// empty-scope one — they never get a usable credential. The allowlist matches
 	// the userHash (stable, non-spoofable), not the display name.
@@ -579,7 +599,8 @@ func (a *mcpAuthorizer) handleAuthorize(w http.ResponseWriter, r *http.Request) 
 		userHash = sub // synthetic dev user: gate is bypassed by isMCPAllowed anyway
 	}
 	byGrant := !a.dev && grants.isAdmin(sub, username)
-	if !a.isMCPAllowed(userHash) && !byGrant {
+	admin := a.isMCPAllowed(userHash) || byGrant
+	if !admin && !a.memberAccess {
 		a.logger.Warn().Str("userHash", userHash).Msg("mcp authorize denied: user not on allowlist")
 		loc, err := url.Parse(redirectURI)
 		if err != nil {
@@ -611,6 +632,12 @@ func (a *mcpAuthorizer) handleAuthorize(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
+	scopes := a.grantedScopes(userHash, byGrant)
+	if !admin {
+		scopes = []string{scopeRead, scopeWriteOwn}
+		a.logger.Info().Str("userHash", userHash).Msg("mcp authorize: member")
+	}
+
 	code := randB64(32)
 	a.mu.Lock()
 	// Bound the map: at cap, evict the oldest code before inserting.
@@ -630,7 +657,7 @@ func (a *mcpAuthorizer) handleAuthorize(w http.ResponseWriter, r *http.Request) 
 		redirectURI: redirectURI,
 		resource:    a.resource,
 		sub:         sub,
-		scopes:      a.grantedScopes(userHash, byGrant),
+		scopes:      scopes,
 		expiresAt:   time.Now().Add(2 * time.Minute),
 	}
 	a.mu.Unlock()
@@ -940,7 +967,7 @@ func (a *mcpAuthorizer) renderConsent(w http.ResponseWriter, username, clientID,
 	})
 }
 
-// grantedScopes is scopesForUser widened by an address grant (ADR-066): an admin
+// grantedScopes is scopesForUser widened by an access grant (ADR-066): an admin
 // named in the deployment's configuration gets the same full scopes.
 func (a *mcpAuthorizer) grantedScopes(userHash string, byGrant bool) []string {
 	if byGrant {
