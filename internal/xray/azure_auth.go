@@ -123,6 +123,10 @@ func (a *azureAuth) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 	// userID is "azure:<oid>" — tenant-scoped object ID, stable and unique.
 	userID := "azure:" + oid
+	if !grants.allowsUser(userID, login) {
+		http.Error(w, "not granted access to this instance", http.StatusForbidden)
+		return
+	}
 	token := sessions.create(login, userID)
 	http.SetCookie(w, &http.Cookie{
 		Name:     "xray_session",

@@ -57,7 +57,7 @@ func TestGoogleIdentity_AcceptsWorkspaceAccount(t *testing.T) {
 	g := newTestGoogleAuth("")
 	login, sub, err := g.identity(googleTestToken(t, workspaceClaims()), time.Now())
 	require.NoError(t, err)
-	assert.Equal(t, "alice", login)
+	assert.Equal(t, "alice@example.com", login)
 	assert.Equal(t, "1234567890", sub)
 }
 
@@ -113,7 +113,7 @@ func TestGoogleIdentity_AnyDomainOnlyWhenUnset(t *testing.T) {
 	c["email"] = "someone@gmail.com"
 	login, _, err := g.identity(googleTestToken(t, c), time.Now())
 	require.NoError(t, err)
-	assert.Equal(t, "someone", login)
+	assert.Equal(t, "someone@gmail.com", login)
 }
 
 func TestGoogleLogin_RedirectsWithStateAndDomainHint(t *testing.T) {
@@ -189,7 +189,7 @@ func TestGoogleCallback_SignsInWorkspaceUser(t *testing.T) {
 	require.NotNil(t, c)
 	username, userID, ok := sessions.validate(c.Value)
 	require.True(t, ok)
-	assert.Equal(t, "alice", username)
+	assert.Equal(t, "alice@example.com", username)
 	assert.Equal(t, "google:1234567890", userID)
 }
 

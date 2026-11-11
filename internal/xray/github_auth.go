@@ -149,6 +149,10 @@ func (g *githubAuth) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 	// Create X-Ray session. userID is "github:<numericID>" — globally unique, never reassigned.
 	userID := "github:" + numericID
+	if !grants.allowsUser(userID, login) {
+		http.Error(w, "not granted access to this instance", http.StatusForbidden)
+		return
+	}
 	token := sessions.create(login, userID)
 	http.SetCookie(w, &http.Cookie{
 		Name:     "xray_session",
