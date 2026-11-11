@@ -124,7 +124,7 @@ func (g *googleAuth) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	login, sub, err := g.identity(idToken, time.Now())
-	if err != nil {
+	if err != nil || !grants.allowsUser("google:"+sub, login) {
 		http.Error(w, "this Google account may not sign in", http.StatusForbidden)
 		return
 	}
@@ -177,7 +177,7 @@ func (g *googleAuth) exchangeCode(code string) (string, error) {
 	return tok.IDToken, nil
 }
 
-// identity checks the ID token's claims and returns (login, sub). The token comes
+// identity checks the ID token's claims and returns (address, sub). The token comes
 // straight from Google's token endpoint over TLS, so its signature is not
 // re-verified (OpenID Connect Core 3.1.3.7); issuer, audience and expiry still are.
 // The domain is enforced on hd, which Google sets only for Workspace accounts: an
@@ -217,6 +217,9 @@ func (g *googleAuth) identity(idToken string, now time.Time) (string, string, er
 	case g.cfg.Domain != "" && !strings.EqualFold(c.HD, g.cfg.Domain):
 		return "", "", fmt.Errorf("account is not in the %s workspace", g.cfg.Domain)
 	}
-	login, _, _ := strings.Cut(c.Email, "@")
-	return login, c.Sub, nil
+	// The full address: deployments grant access by it (ADR-066).
+	if !isASCII(c.Email) {
+		return "", "", fmt.Errorf("non-ASCII email")
+	}
+	return strings.ToLower(c.Email), c.Sub, nil
 }

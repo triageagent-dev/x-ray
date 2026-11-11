@@ -735,10 +735,14 @@ func (s *Server) callerIdentity(r *http.Request) (username, userID string) {
 	if c, err := r.Cookie("xray_session"); err == nil {
 		username, userID, _ = sessions.validate(c.Value)
 	}
-	if username == "" {
+	if username == "" || !grants.allowsUser(userID, username) {
+		username, userID = "", ""
 		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
 			username, userID, _ = sessions.validate(auth[7:])
 		}
+	}
+	if !grants.allowsUser(userID, username) {
+		return "", ""
 	}
 	return username, userID
 }

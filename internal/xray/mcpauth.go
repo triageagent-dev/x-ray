@@ -545,7 +545,7 @@ func (a *mcpAuthorizer) handleAuthorize(w http.ResponseWriter, r *http.Request) 
 		username = "dev-user"
 		sub = "dev:local"
 	} else if c, err := r.Cookie("xray_session"); err == nil {
-		if uname, uid, ok := sessions.validate(c.Value); ok {
+		if uname, uid, ok := sessions.validate(c.Value); ok && grants.allowsUser(uid, uname) {
 			username, sub = uname, uid
 		}
 	}
@@ -568,8 +568,9 @@ func (a *mcpAuthorizer) handleAuthorize(w http.ResponseWriter, r *http.Request) 
 	if a.dev {
 		userHash = sub // synthetic dev user: gate is bypassed by isMCPAllowed anyway
 	}
-	if !a.isMCPAllowed(userHash) {
-		a.logger.Warn().Str("user", username).Str("userHash", userHash).Msg("mcp authorize denied: user not on allowlist")
+	byGrant := !a.dev && grants.isAdmin(sub, username)
+	if !a.isMCPAllowed(userHash) && !byGrant {
+		a.logger.Warn().Str("userHash", userHash).Msg("mcp authorize denied: user not on allowlist")
 		loc, err := url.Parse(redirectURI)
 		if err != nil {
 			http.Error(w, "invalid_request: bad redirect_uri", http.StatusBadRequest)
@@ -604,7 +605,7 @@ func (a *mcpAuthorizer) handleAuthorize(w http.ResponseWriter, r *http.Request) 
 		redirectURI: redirectURI,
 		resource:    a.resource,
 		sub:         sub,
-		scopes:      a.scopesForUser(userHash),
+		scopes:      a.grantedScopes(userHash, byGrant),
 		expiresAt:   time.Now().Add(2 * time.Minute),
 	}
 	a.mu.Unlock()
@@ -796,4 +797,13 @@ func tokenError(w http.ResponseWriter, code, desc string) {
 // hasScope reports whether scopes contains want.
 func hasScope(scopes []string, want string) bool {
 	return slices.Contains(scopes, want)
+}
+
+// grantedScopes is scopesForUser widened by an address grant (ADR-066): an admin
+// named in the deployment's configuration gets the same full scopes.
+func (a *mcpAuthorizer) grantedScopes(userHash string, byGrant bool) []string {
+	if byGrant {
+		return append([]string(nil), allMCPScopes...)
+	}
+	return a.scopesForUser(userHash)
 }
