@@ -183,3 +183,14 @@ func inlineScripts(doc []byte) [][]byte {
 		rest = body[k:]
 	}
 }
+
+// BuiltFor reports whether the export was built for a server mounted at base
+// (make build BASE_PATH=…): its pages load their scripts from base + "/_next/".
+// An export without index.html has nothing to check.
+func BuiltFor(root fs.FS, base string) bool {
+	index, err := fs.ReadFile(root, "index.html")
+	if err != nil {
+		return true
+	}
+	return bytes.Contains(index, []byte(`"`+base+`/_next/`))
+}

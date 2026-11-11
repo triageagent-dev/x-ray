@@ -88,7 +88,7 @@ func (g *googleAuth) callbackURL() string { return g.cfg.PublicURL + "/v1/auth/g
 
 func (g *googleAuth) handleLogin(w http.ResponseWriter, r *http.Request) {
 	state := g.newState(resolveUIOrigin(r.URL.Query().Get("ui"), g.cfg.UICallbackOrigins))
-	setStateCookie(w, state)
+	setStateCookie(w, BasePath(g.cfg.PublicURL), state)
 	q := url.Values{
 		"client_id":     {g.cfg.ClientID},
 		"response_type": {"code"},
@@ -107,7 +107,7 @@ func (g *googleAuth) handleCallback(w http.ResponseWriter, r *http.Request) {
 	state := r.URL.Query().Get("state")
 	code := r.URL.Query().Get("code")
 
-	clearStateCookie(w)
+	clearStateCookie(w, BasePath(g.cfg.PublicURL))
 	if !stateCookieMatches(r, state) {
 		http.Error(w, "invalid state", http.StatusBadRequest)
 		return
@@ -134,13 +134,13 @@ func (g *googleAuth) handleCallback(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     "xray_session",
 		Value:    token,
-		Path:     "/",
+		Path:     BasePath(g.cfg.PublicURL) + "/",
 		MaxAge:   86400,
 		HttpOnly: true,
 		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
 	})
-	http.Redirect(w, r, uiCallbackRedirect(st.uiOrigin, token), http.StatusFound)
+	http.Redirect(w, r, uiCallbackRedirect(st.uiOrigin, token, BasePath(g.cfg.PublicURL)), http.StatusFound)
 }
 
 // exchangeCode trades the authorization code for the ID token.

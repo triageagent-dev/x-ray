@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -553,8 +554,8 @@ func main() {
 		PublicURL:         publicURL,
 		UICallbackOrigins: uiOrigins,
 	}
-	// In dev mode CORS allows all origins; in prod lock to the configured public URL.
-	allowedOrigin := publicURL
+	// In dev mode CORS allows all origins; in prod lock to the configured public URL's origin.
+	allowedOrigin := publicOrigin(publicURL)
 	if dev {
 		allowedOrigin = ""
 	}
@@ -565,6 +566,9 @@ func main() {
 	if webUI {
 		if assets, ok := webui.Assets(); ok {
 			uiFS = assets
+			if base := xray.BasePath(publicURL); !webui.BuiltFor(assets, base) {
+				logger.Warn().Str("base_path", base).Msg("the embedded UI was built for another base path, so its pages will not load: build it with make build BASE_PATH=<the --public-url path>")
+			}
 			logger.Info().Msg("web UI embedded: serving it at /")
 		} else {
 			logger.Info().Msg("this binary was built without the web UI (make ui); serving the API only")
@@ -577,7 +581,8 @@ func main() {
 			Domain:            googleDomain,
 			PublicURL:         publicURL,
 			UICallbackOrigins: uiOrigins,
-		}))
+		}),
+		xray.WithBasePath(xray.BasePath(publicURL)))
 
 	if gcpProject != "" || geminiAPIKey != "" {
 		voiceLoc := voiceLocation
@@ -835,4 +840,14 @@ func isLoopbackAddr(addr string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+// publicOrigin is the scheme and host of the public URL, which is all a browser
+// sends as Origin; the path the server is mounted under is not part of it.
+func publicOrigin(publicURL string) string {
+	u, err := url.Parse(publicURL)
+	if err != nil || u.Host == "" {
+		return publicURL
+	}
+	return u.Scheme + "://" + u.Host
 }

@@ -107,7 +107,7 @@ export default function AuthCallbackPage() {
             <h1 className="text-xl font-semibold tracking-tight text-white">Sign-in failed</h1>
             <p className="max-w-sm text-sm text-white/50">{error}</p>
             <a
-              href="/login"
+              href={asset("/login")}
               className="rounded-lg border border-white/20 bg-white/5 px-6 py-2 text-sm font-medium text-white transition-colors hover:bg-white/10"
             >
               Try again

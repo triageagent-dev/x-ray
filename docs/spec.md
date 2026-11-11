@@ -286,7 +286,7 @@ Every route under `/v1` needs a session except the sign-in routes, `/v1/version`
 | MCP, OAuth 2.1 | `--mcp-oauth`. The server is its own authorization server: discovery under `/.well-known`, `/register`, `/authorize`, `/token`, with PKCE. Tokens are audience-bound JWTs with the read and write scopes; `--mcp-token-ttl` sets their lifetime. The user must be signed in to the web app first |
 | Write access | `writeAllowedUsers` in the configuration cell limits who may hold the write scope |
 
-`--public-url` is the externally reachable base URL. It scopes CORS, the OAuth callbacks and the origin check on the voice WebSocket. `--trusted-proxy-hops` says how many proxies in front of the server append the client address, which decides how `X-Forwarded-For` is read for rate limiting. `--max-request-bytes` caps request bodies.
+`--public-url` is the externally reachable base URL. It scopes CORS, the OAuth callbacks and the origin check on the voice WebSocket. The origin check compares the scheme and host only. A path in it (`https://gw.example.com/path`) mounts the server under that path on a shared host: redirects, the session and state cookies, the PWA manifest and the service worker stay under it, and the OAuth metadata is also served at the host root with the path inserted (RFC 8414, RFC 9728). The proxy forwards the path unchanged, and the UI in the image must be built for it (`make build BASE_PATH=/path`; ADR-064). `--trusted-proxy-hops` says how many proxies in front of the server append the client address, which decides how `X-Forwarded-For` is read for rate limiting. `--max-request-bytes` caps request bodies.
 
 ## Voice
 
@@ -328,7 +328,7 @@ Voice needs Gemini credentials: `--gcp-project` for Vertex AI, or `--gemini-api-
 
 The web UI is part of the binary. It is a client of the API above, built as a static export and embedded, and the server serves it at `/` on the same origin as the API. API paths, `/healthz`, the PWA files, `/mcp` and the OAuth endpoints go to the server; everything else is the UI. It runs the same locally and in a cluster: `make run` opens it on port 8080 with sign-in off, and the chart serves it through the same Service. `--ui=false` serves the API alone, and a binary built with `UI=0` has no UI at all.
 
-One origin is required. The voice WebSocket URL is built in the browser from its own host, the session cookie has no `Domain`, and the server checks the WebSocket's `Origin` against `--public-url`. Embedding gives it, so `--public-url` is simply the address users reach, and it is also the OAuth callback base.
+One origin is required. The voice WebSocket URL is built in the browser from its own host, the session cookie has no `Domain`, and the server checks the WebSocket's `Origin` against the scheme and host of `--public-url`. Embedding gives it, so `--public-url` is simply the address users reach, and it is also the OAuth callback base.
 
 Each document is served with a `script-src` that names the hashes of its own inline scripts, so no script runs without one; `'unsafe-inline'` is allowed for styles only. Hashed bundles are cached for a year, and HTML is revalidated so an upgrade is seen at once.
 

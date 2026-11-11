@@ -314,7 +314,7 @@ func TestSessionStore_RestoredSessionsStaySnapshotted(t *testing.T) {
 // callback request carrying that cookie — mirroring the real login→callback flow.
 func reqWithStateCookie(state string) *http.Request {
 	rec := httptest.NewRecorder()
-	setStateCookie(rec, state)
+	setStateCookie(rec, "", state)
 	r := httptest.NewRequest(http.MethodGet, "/v1/auth/github/callback", nil)
 	for _, c := range rec.Result().Cookies() {
 		r.AddCookie(c)
@@ -344,7 +344,7 @@ func TestStateCookie_RejectsEmptyQueryState(t *testing.T) {
 
 func TestStateCookie_RejectsTamperedSignature(t *testing.T) {
 	rec := httptest.NewRecorder()
-	setStateCookie(rec, "abc123")
+	setStateCookie(rec, "", "abc123")
 	r := httptest.NewRequest(http.MethodGet, "/v1/auth/github/callback", nil)
 	// Forge a cookie with the right state value but a bogus signature.
 	r.AddCookie(&http.Cookie{Name: oauthStateCookie, Value: "abc123.deadbeef"})
@@ -359,11 +359,12 @@ func TestStateCookie_RejectsUnsignedValue(t *testing.T) {
 
 func TestStateCookie_SetCookieAttributes(t *testing.T) {
 	rec := httptest.NewRecorder()
-	setStateCookie(rec, "abc123")
+	setStateCookie(rec, "", "abc123")
 	cookies := rec.Result().Cookies()
 	require.Len(t, cookies, 1)
 	c := cookies[0]
 	assert.Equal(t, oauthStateCookie, c.Name)
+	assert.Equal(t, "/v1/auth/", c.Path)
 	assert.True(t, c.HttpOnly, "state cookie must be HttpOnly")
 	assert.True(t, c.Secure, "state cookie must be Secure")
 	assert.Equal(t, http.SameSiteLaxMode, c.SameSite, "Lax is required to survive the OAuth redirect")

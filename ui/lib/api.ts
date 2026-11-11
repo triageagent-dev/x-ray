@@ -1,5 +1,7 @@
 // API client — all fetch calls go through here so the base URL is consistent.
 
+import { API_MOUNT } from "@/lib/utils"
+
 export interface MemoryItem {
   id: string
   kind: string
@@ -72,6 +74,8 @@ export function hitTagMap(evt: MemoryHitEvent | null | undefined): Map<string, s
 }
 
 const base = process.env.NEXT_PUBLIC_API_URL ?? ""
+// A path base keeps the API on this origin (see API_MOUNT); anything else is another origin.
+const crossOrigin = base !== "" && API_MOUNT === ""
 
 // Version prefix of the API surface. X-Ray's own server serves it at /v1; the
 // Triage deployment of the same API serves the identical surface at /v2 — same
@@ -300,7 +304,7 @@ export function beginLogin(provider: string): string {
   url.searchParams.set("state", state)
   // Only meaningful cross-origin: it asks the API to hand the session back to
   // this UI. Same-origin, the cookie is the credential and this is inert.
-  if (base) url.searchParams.set("ui", window.location.origin)
+  if (crossOrigin) url.searchParams.set("ui", window.location.origin)
   return url.toString()
 }
 
@@ -562,7 +566,7 @@ function openMemoryStream() {
   }
 
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:"
-  const ws = new WebSocket(`${proto}//${window.location.host}${endpoints.events.path}`, wsProtocols())
+  const ws = new WebSocket(`${proto}//${window.location.host}${API_MOUNT}${endpoints.events.path}`, wsProtocols())
   sharedSource = ws
 
   ws.onopen = () => { reconnectDelay = 0 }
