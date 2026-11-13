@@ -22,7 +22,9 @@ configuration, never from code. They work for every sign-in provider:
 - A principal has one of three forms, each keyed on what the session already carries:
   - `google:<address>`: the address, ASCII only and lower-cased, in `--google-domain` (the lists
     need it: sign-in then admits only that domain's managed accounts, the `hd` claim; without it a
-    consumer Google account with a verified look-alike address would match). A Google session's
+    consumer Google account with a verified look-alike address would match). `--google-domain` takes one
+    domain, so an address in a secondary domain cannot be listed. A non-ASCII address never matches a
+    list (and signs in as before when no list is set). A Google session's
     name is the full address so the list can match it; reassigning an address inside Workspace
     moves its access with it.
   - `github:<numeric user id>`: digits only. A GitHub login can be renamed and the old one
@@ -40,6 +42,8 @@ configuration, never from code. They work for every sign-in provider:
   subprotocol; a stale unlisted cookie does not shadow a valid Bearer, and `/v1/auth/me` no longer
   reports a removed user), at `/authorize` and for voice writes. `writeAllowedUsers` stays and is
   unioned in for the admin interface.
+- An issued MCP token is not re-checked and there is no refresh token, so a principal removed from a
+  list keeps a working MCP token until it expires (`--mcp-token-ttl`, 15 minutes by default).
 - Start-up refuses a principal for a provider that has no client id (`--google-client-id`,
   `--github-client-id`, `--azure-client-id`), and logs only the list sizes, never the principals.
 - The principal is the grant key, never what a model is told: a voice prompt gets the local part
