@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"flag"
 	"io/fs"
 	"net"
@@ -119,11 +120,16 @@ func main() {
 		googleClientID            string
 		googleClientSecret        string
 		googleDomain              string
+		accessUsers               string
+		accessAdmins              string
 		dev                       bool
 		allowAnyUser              bool
 		mcpOAuth                  bool
 		mcpResourceURL            string
 		mcpTokenTTL               time.Duration
+		mcpStaticClientID         string
+		mcpStaticClientRedirects  string
+		mcpMemberAccess           bool
 		episodicTTL               time.Duration
 		retentionSweepInterval    time.Duration
 		trustedProxyHops          int
@@ -184,12 +190,17 @@ func main() {
 	flag.StringVar(&googleClientID, "google-client-id", "", "Google OAuth client ID")
 	flag.StringVar(&googleClientSecret, "google-client-secret", "", "Google OAuth client secret")
 	flag.StringVar(&googleDomain, "google-domain", "", "Required Google Workspace domain (the ID token's hd claim) for access")
+	flag.StringVar(&accessUsers, "access-users", "", "Comma-separated principals that may sign in, with any provider: google:<address> (in --google-domain), github:<numeric user id>, azure:<Entra object id>. With this or --access-admins set, only listed principals sign in; with neither, anyone the provider admits")
+	flag.StringVar(&accessAdmins, "access-admins", "", "Comma-separated principals, in the same forms as --access-users, granted the admin interface (MCP token, voice writes); they may also sign in")
 	flag.BoolVar(&webUI, "ui", true, "Serve the embedded web UI at / (when this binary was built with one)")
 	flag.BoolVar(&dev, "dev", false, "Dev mode: disable auth requirement and allow all CORS origins")
 	flag.BoolVar(&allowAnyUser, "allow-any-user", false, "Let any GitHub account (no --github-org), any Entra account (no --azure-tenant-id) or any Google account (no --google-domain) sign in. Without it the server refuses to start with a provider and no restriction")
 	flag.BoolVar(&mcpOAuth, "mcp-oauth", false, "Enable the co-located OAuth 2.1 authorization server for MCP (RFC 9728 discovery + /authorize + /token, mounted on the main server)")
 	flag.StringVar(&mcpResourceURL, "mcp-resource-url", "", "MCP resource URL advertised in OAuth metadata (default: <public-url>/mcp)")
 	flag.DurationVar(&mcpTokenTTL, "mcp-token-ttl", 15*time.Minute, "Lifetime of issued MCP access tokens")
+	flag.StringVar(&mcpStaticClientID, "mcp-static-client-id", "", "Client ID of a pre-registered public MCP client (e.g. a Claude.ai custom connector), with --mcp-oauth")
+	flag.StringVar(&mcpStaticClientRedirects, "mcp-static-client-redirect-uris", "", "Comma-separated redirect URIs of --mcp-static-client-id, matched exactly")
+	flag.BoolVar(&mcpMemberAccess, "mcp-member-access", false, "With --mcp-oauth, let a signed-in non-admin use MCP: read shared memory and keep their own private notes (ADR 067)")
 	flag.DurationVar(&episodicTTL, "episodic-ttl", 7*24*time.Hour, "Max age of an episodic session memory before it is forgotten — dropped from get_recent_memory and deleted by the reaper (0 = never forget). See ADR-020")
 	flag.DurationVar(&retentionSweepInterval, "retention-sweep-interval", time.Hour, "How often the general retention sweep runs, hard-deleting memory items past their StaleAfter deadline (0 = disabled). Durable/config kinds (system_configuration, system_identity, policy, mental_map/map-carrying cells) and episodic memories (owned by --episodic-ttl instead) are exempt regardless of StaleAfter; an item with no StaleAfter set never expires.")
 	flag.IntVar(&trustedProxyHops, "trusted-proxy-hops", 0, "Number of trusted reverse proxies in front of the server (e.g. 1 for a single ingress/LB that appends the client IP). Controls how X-Forwarded-For is read for rate-limit keying: only this many entries from the right are trusted; 0 (default) ignores XFF and keys on the TCP peer address, which cannot be spoofed.")
@@ -215,6 +226,8 @@ func main() {
 	envDefault(&googleClientID, "GOOGLE_CLIENT_ID")
 	envDefault(&googleClientSecret, "GOOGLE_CLIENT_SECRET")
 	envDefault(&googleDomain, "GOOGLE_DOMAIN")
+	envDefault(&accessUsers, "ACCESS_USERS")
+	envDefault(&accessAdmins, "ACCESS_ADMINS")
 
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnixMs
 	log.Logger = log.Output(zerolog.ConsoleWriter{
@@ -262,6 +275,9 @@ func main() {
 	if dev && (githubClientID != "" || azureClientID != "" || googleClientID != "") {
 		log.Fatal().Msg("--dev turns sign-in off and cannot be combined with --github-client-id, --azure-client-id or --google-client-id")
 	}
+	if err := checkStaticClientFlags(mcpOAuth, mcpStaticClientID, mcpStaticClientRedirects); err != nil {
+		log.Fatal().Err(err).Msg("invalid --mcp-static-client-id / --mcp-static-client-redirect-uris")
+	}
 	if dev && !isLoopbackAddr(httpAddr) {
 		log.Warn().Str("addr", httpAddr).Msg("--dev with sign-in off is listening beyond loopback: anyone who can reach it can read and write memory")
 	}
@@ -280,6 +296,17 @@ func main() {
 		}
 		log.Warn().Msg("azure OAuth without --azure-tenant-id: any Entra user can log in (--allow-any-user)")
 	}
+	accessGrants, err := xray.NewAccessGrants(accessUsers, accessAdmins, googleDomain)
+	if err != nil {
+		log.Fatal().Err(err).Msg("--access-users / --access-admins")
+	}
+	if err := accessGrants.RequireProviders(googleClientID != "", githubClientID != "", azureClientID != ""); err != nil {
+		log.Fatal().Err(err).Msg("--access-users / --access-admins")
+	}
+	if nu, na := accessGrants.Counts(); nu+na > 0 {
+		log.Info().Int("users", nu).Int("admins", na).Msg("access lists set")
+	}
+	xray.SetAccessGrants(accessGrants)
 	if googleClientID != "" && googleDomain == "" {
 		if !allowAnyUser {
 			log.Fatal().Msg("google sign-in needs --google-domain (any Google account would otherwise get a session); pass --allow-any-user to admit everyone")
@@ -616,11 +643,18 @@ func main() {
 		if err != nil {
 			log.Fatal().Err(err).Msg("MCP authorizer init failed")
 		}
-		// MCP is admin-only: gate OAuth token issuance on the live writeAllowedUsers
+		// MCP is admin-only unless --mcp-member-access is set: gate OAuth token issuance on the live writeAllowedUsers
 		// allowlist (userHashes) from the system_configuration CR — same source the
 		// voice write-gate uses. Empty list ⇒ deny all (fail-closed); the static
 		// --mcp-token-secret bearer remains the out-of-band full-access admin path.
 		mcpAuth.SetAllowFn(func() []string { return configWatcher.Get().WriteAllowedUsers })
+		mcpAuth.SetMemberAccess(mcpMemberAccess)
+		if mcpStaticClientID != "" || mcpStaticClientRedirects != "" {
+			if err := mcpAuth.SetStaticClient(mcpStaticClientID, splitAndTrim(mcpStaticClientRedirects)); err != nil {
+				log.Fatal().Err(err).Msg("--mcp-static-client-id / --mcp-static-client-redirect-uris")
+			}
+			logger.Info().Str("client_id", mcpStaticClientID).Msg("pre-registered MCP client")
+		}
 		mcpHandler := xray.NewMCPServer(memory, logger, func() string { return mcpTokenVal.Load().(string) }, mcpAuth, cellSyncer, namespace, memMapsDeps, mcpListMemoryMaxLimit, mcpSearchMemoryMaxLimit, mcpRecentMemoryMaxLimit)
 		srv.SetMCPAuth(mcpAuth, mcpHandler)
 		log.Info().Str("issuer", issuer).Str("resource", resourceURL).Bool("dev", dev).Msg("MCP OAuth enabled at /mcp (+ /.well-known, /authorize, /token)")
@@ -840,6 +874,15 @@ func isLoopbackAddr(addr string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+// checkStaticClientFlags refuses the pre-registered client flags without
+// --mcp-oauth, where they would otherwise be ignored without a word.
+func checkStaticClientFlags(mcpOAuth bool, clientID, redirectURIs string) error {
+	if !mcpOAuth && (clientID != "" || redirectURIs != "") {
+		return errors.New("--mcp-static-client-id and --mcp-static-client-redirect-uris take effect only with --mcp-oauth")
+	}
+	return nil
 }
 
 // publicOrigin is the scheme and host of the public URL, which is all a browser
