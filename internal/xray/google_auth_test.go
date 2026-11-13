@@ -116,6 +116,23 @@ func TestGoogleIdentity_AnyDomainOnlyWhenUnset(t *testing.T) {
 	assert.Equal(t, "someone@gmail.com", login)
 }
 
+func TestGoogleCallback_SignsInNonASCIIAddressWithNoLists(t *testing.T) {
+	c := workspaceClaims()
+	c["email"] = "jos\u00e9@example.com"
+	w := googleCallback(t, googleTestToken(t, c))
+	require.Equal(t, http.StatusFound, w.Code)
+	require.NotNil(t, sessionCookie(w))
+}
+
+func TestGoogleCallback_NonASCIIAddressIsRefusedByAList(t *testing.T) {
+	withGrants(t, "google:k@example.com", "")
+	c := workspaceClaims()
+	c["email"] = "\u212A@example.com" // the Kelvin sign lower-cases to "k"
+	w := googleCallback(t, googleTestToken(t, c))
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Nil(t, sessionCookie(w))
+}
+
 func TestGoogleLogin_RedirectsWithStateAndDomainHint(t *testing.T) {
 	g := newTestGoogleAuth("")
 	w := httptest.NewRecorder()

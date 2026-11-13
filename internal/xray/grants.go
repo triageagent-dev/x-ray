@@ -123,9 +123,13 @@ func (g AccessGrants) Counts() (users, admins int) { return len(g.users), len(g.
 
 // principalOf is the normalised principal a session is matched as: the full
 // address for Google (the session id is the account's sub), the session id for
-// GitHub and Entra.
+// GitHub and Entra. A non-ASCII Google address yields "", which no list holds, so
+// it matches nothing (isASCII).
 func principalOf(userID, username string) string {
 	if isGoogleSession(userID) {
+		if !isASCII(username) {
+			return ""
+		}
 		return "google:" + strings.ToLower(username)
 	}
 	return strings.ToLower(userID)

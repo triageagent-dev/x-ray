@@ -139,6 +139,16 @@ func TestAccessGrants_Decisions(t *testing.T) {
 	}
 }
 
+// strings.ToLower folds the Kelvin sign (U+212A) to "k", so a non-ASCII address
+// must never match a listed ASCII principal; with a list set it is simply refused.
+func TestAccessGrants_NonASCIIGoogleAddressMatchesNothing(t *testing.T) {
+	g, err := NewAccessGrants("google:k@example.com", "google:k@example.com", "example.com")
+	require.NoError(t, err)
+	assert.False(t, g.allowsUser("google:1", "\u212A@example.com"))
+	assert.False(t, g.isAdmin("google:1", "\u212A@example.com"))
+	assert.True(t, g.allowsUser("google:2", "k@example.com"))
+}
+
 func TestAccessGrants_RequireProviders(t *testing.T) {
 	g, err := NewAccessGrants("google:a@example.com", "github:42,azure:"+oidA, "example.com")
 	require.NoError(t, err)

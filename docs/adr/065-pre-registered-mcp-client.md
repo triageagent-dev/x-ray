@@ -34,3 +34,15 @@ client (PKCE, no secret) at startup.
 - A Claude.ai connector works with the client ID entered and the secret left empty, and the
   registration endpoint need not be reachable from Claude's cloud.
 - A user still needs a session and a place on `writeAllowedUsers` to be issued a token.
+
+## Residual risk
+
+The consent page cannot tell a user's own connector flow from one an attacker started and
+sent as a link: someone starts a flow at the shared callback service, and a user who opens
+its `/authorize` link and clicks Allow gives that flow their token. What limits it: the page
+names the user, the client and the callback host; the redirect URIs are fixed and matched
+exactly, so a code goes only to the registered callback; the Allow link is bound to the browser
+session and the exact request and expires in five minutes; and a token is issued only to a user
+on `writeAllowedUsers`. What it does not stop is a user approving a request they did not start,
+so the page's line "Approve only if you started this connection yourself just now" is the
+remaining control. Each approval is logged with the user and client (`mcp authorize: code issued`).

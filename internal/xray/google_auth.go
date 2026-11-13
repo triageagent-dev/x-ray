@@ -217,9 +217,11 @@ func (g *googleAuth) identity(idToken string, now time.Time) (string, string, er
 	case g.cfg.Domain != "" && !strings.EqualFold(c.HD, g.cfg.Domain):
 		return "", "", fmt.Errorf("account is not in the %s workspace", g.cfg.Domain)
 	}
-	// The full address: deployments grant access by it (ADR-066).
+	// The full address: deployments grant access by it (ADR-066). A non-ASCII one is
+	// returned as issued: lower-casing would fold the Kelvin sign into "k" before the
+	// grants see it (principalOf).
 	if !isASCII(c.Email) {
-		return "", "", fmt.Errorf("non-ASCII email")
+		return c.Email, c.Sub, nil
 	}
 	return strings.ToLower(c.Email), c.Sub, nil
 }

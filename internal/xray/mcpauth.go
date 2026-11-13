@@ -675,7 +675,7 @@ func (a *mcpAuthorizer) handleAuthorize(w http.ResponseWriter, r *http.Request) 
 	loc.RawQuery = rq.Encode()
 	// Log the userHash (stable, non-spoofable, non-PII), never the raw SSO ID —
 	// `sub` is the provider OID (e.g. azure:<oid>) and must not land in logs.
-	a.logger.Info().Str("userHash", userHash).Str("redirect", loc.Host).Msg("mcp authorize: code issued")
+	a.logger.Info().Str("user", username).Str("userHash", userHash).Str("client_id", clientID).Str("redirect", loc.Host).Msg("mcp authorize: code issued")
 	http.Redirect(w, r, loc.String(), http.StatusFound)
 }
 

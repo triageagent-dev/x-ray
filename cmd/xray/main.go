@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"flag"
 	"io/fs"
 	"net"
@@ -273,6 +274,9 @@ func main() {
 	// the provider), so the combination is refused.
 	if dev && (githubClientID != "" || azureClientID != "" || googleClientID != "") {
 		log.Fatal().Msg("--dev turns sign-in off and cannot be combined with --github-client-id, --azure-client-id or --google-client-id")
+	}
+	if err := checkStaticClientFlags(mcpOAuth, mcpStaticClientID, mcpStaticClientRedirects); err != nil {
+		log.Fatal().Err(err).Msg("invalid --mcp-static-client-id / --mcp-static-client-redirect-uris")
 	}
 	if dev && !isLoopbackAddr(httpAddr) {
 		log.Warn().Str("addr", httpAddr).Msg("--dev with sign-in off is listening beyond loopback: anyone who can reach it can read and write memory")
@@ -870,6 +874,15 @@ func isLoopbackAddr(addr string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+// checkStaticClientFlags refuses the pre-registered client flags without
+// --mcp-oauth, where they would otherwise be ignored without a word.
+func checkStaticClientFlags(mcpOAuth bool, clientID, redirectURIs string) error {
+	if !mcpOAuth && (clientID != "" || redirectURIs != "") {
+		return errors.New("--mcp-static-client-id and --mcp-static-client-redirect-uris take effect only with --mcp-oauth")
+	}
+	return nil
 }
 
 // publicOrigin is the scheme and host of the public URL, which is all a browser
