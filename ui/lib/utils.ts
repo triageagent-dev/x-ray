@@ -47,3 +47,17 @@ export const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH || ""
 export function asset(path: string): string {
   return BASE_PATH + path
 }
+
+/**
+ * The path the API is mounted under on this origin, when the build sets
+ * NEXT_PUBLIC_API_URL to a path ("/path": the server and this export share that
+ * prefix behind a path-routing proxy). "" when the API is at the origin root or
+ * on another origin. Things the server serves itself (WebSockets, the PWA
+ * manifest and service worker) are addressed through it.
+ */
+export function apiMount(apiUrl: string | undefined): string {
+  const v = apiUrl ?? ""
+  return v.startsWith("/") && !v.startsWith("//") ? v.replace(/\/+$/, "") : ""
+}
+
+export const API_MOUNT = apiMount(process.env.NEXT_PUBLIC_API_URL)

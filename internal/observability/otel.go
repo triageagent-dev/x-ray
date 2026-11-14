@@ -76,10 +76,25 @@ var (
 	sessionBuckets = []float64{5, 15, 30, 60, 120, 300, 600, 1200, 1800, 3600}
 )
 
+// traceResourceAttrs names the spans' source: service.name (default "xray"; one
+// name per instance lets a trace consumer tell instances apart, for example to
+// score one and not another) and the openinference project when set.
+func traceResourceAttrs(serviceName, projectName string) []attribute.KeyValue {
+	name := strings.TrimSpace(serviceName)
+	if name == "" {
+		name = "xray"
+	}
+	attrs := []attribute.KeyValue{semconv.ServiceName(name), semconv.ServiceVersion(version.Version)}
+	if p := strings.TrimSpace(projectName); p != "" {
+		attrs = append(attrs, attribute.String("openinference.project.name", p))
+	}
+	return attrs
+}
+
 // ConfigureOTel sets the global TracerProvider. When endpoint is empty, installs
 // a no-op provider (zero overhead). Safe to call multiple times. A non-nil token
 // is sent as a bearer header with every export.
-func ConfigureOTel(ctx context.Context, endpoint, projectName string, token *BearerToken, logger zerolog.Logger) error {
+func ConfigureOTel(ctx context.Context, endpoint, serviceName, projectName string, token *BearerToken, logger zerolog.Logger) error {
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -97,15 +112,7 @@ func ConfigureOTel(ctx context.Context, endpoint, projectName string, token *Bea
 		return fmt.Errorf("create otel exporter: %w", err)
 	}
 
-	resourceAttrs := []attribute.KeyValue{
-		semconv.ServiceName("xray"),
-		semconv.ServiceVersion(version.Version),
-	}
-	if p := strings.TrimSpace(projectName); p != "" {
-		resourceAttrs = append(resourceAttrs, attribute.String("openinference.project.name", p))
-	}
-
-	res, err := resource.New(ctx, resource.WithAttributes(resourceAttrs...))
+	res, err := resource.New(ctx, resource.WithAttributes(traceResourceAttrs(serviceName, projectName)...))
 	if err != nil {
 		return fmt.Errorf("create otel resource: %w", err)
 	}

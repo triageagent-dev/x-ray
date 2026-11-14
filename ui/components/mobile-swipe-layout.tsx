@@ -12,7 +12,7 @@ import { MemoryGraph } from "@/components/memory-graph"
 import { MobileItemOverlay } from "@/components/mobile-item-overlay"
 import { categoryById, categoryOf, MOBILE_GRAPH_NODES } from "@/lib/category-config"
 import { useCategories } from "@/hooks/use-categories"
-import { fetchUserNotes, subscribeMemoryEvents, hitKindMap, type MemoryItem, type MemoryItemSummary, api } from "@/lib/api"
+import { fetchUserNotes, subscribeMemoryEvents, hitKindMap, hitTagMap, type MemoryItem, type MemoryItemSummary, api } from "@/lib/api"
 
 // ─── Tab definitions ──────────────────────────────────────────────────────────
 // Content tabs are the UI categories (icons/labels/colors from category-config);
@@ -222,6 +222,7 @@ const HomeSection = memo(function HomeSection({ onOpenItem, query }: { onOpenIte
   // Per-hit kind — undefined when there's no live hit or the server hasn't
   // sent kinds; MemoryGraph degrades to cell-only flashing in that case.
   const hitKinds = useMemo(() => hitKindMap(hits), [hits])
+  const hitTags = useMemo(() => hitTagMap(hits), [hits])
 
   useEffect(() => {
     if (!username || username === "anonymous") { setUserNotes([]); return }
@@ -265,6 +266,7 @@ const HomeSection = memo(function HomeSection({ onOpenItem, query }: { onOpenIte
         query={query}
         highlightIds={highlightIds}
         hitKinds={hitKinds}
+        hitTags={hitTags}
         extraItems={userNotes}
         tapShowsTooltip
         onSelect={(id, _x, _y, kind) => onOpenItem(id, kind)}

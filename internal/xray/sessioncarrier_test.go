@@ -162,16 +162,17 @@ func TestResolveUIOrigin(t *testing.T) {
 func TestUICallbackRedirect(t *testing.T) {
 	// No hand-off requested: the same-origin default, where the cookie just set
 	// is the whole credential and no token should appear in a URL at all.
-	assert.Equal(t, "/", uiCallbackRedirect("", "tok123"))
+	assert.Equal(t, "/", uiCallbackRedirect("", "tok123", ""))
+	assert.Equal(t, "/path/", uiCallbackRedirect("", "tok123", "/path"))
 
 	assert.Equal(t,
 		"https://ui.example.com/auth/callback?token=tok123",
-		uiCallbackRedirect("https://ui.example.com", "tok123"))
+		uiCallbackRedirect("https://ui.example.com", "tok123", ""))
 
 	// Tokens are hex today, but the redirect must not depend on that.
 	assert.Equal(t,
 		"https://ui.example.com/auth/callback?token=a%2Fb+c%26d",
-		uiCallbackRedirect("https://ui.example.com", "a/b c&d"))
+		uiCallbackRedirect("https://ui.example.com", "a/b c&d", ""))
 }
 
 // ── requireSession gate ───────────────────────────────────────────────────────

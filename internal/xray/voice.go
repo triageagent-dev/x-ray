@@ -154,6 +154,9 @@ type VoiceManager struct {
 	headroomLimit            int    // --headroom-content-limit flag default; CR MaxItemContentChars overrides when non-zero (ADR-038)
 	affectiveDialog          bool   // --voice-affective-dialog: model detects emotional tone and adapts (native-audio)
 	proactiveAudio           bool   // --voice-proactive-audio: model may stay silent on out-of-context/background speech (native-audio)
+	sessionResumption        bool   // --voice-session-resumption flag default; CR SessionResumption overrides when set (ADR-039)
+	ctxTriggerTokens         int    // --voice-context-trigger-tokens flag default (0 = off); CR ContextTriggerTokens overrides when non-zero (ADR-039)
+	ctxTargetTokens          int    // --voice-context-target-tokens flag default (0 = server picks half the trigger); CR ContextTargetTokens overrides together with the CR trigger
 	maxConcurrent            int    // cap on simultaneous voice sessions; 0 = unlimited
 	pendingSlots             int    // sessions admitted but not yet registered; counts against maxConcurrent
 	upgrader                 websocket.Upgrader
@@ -173,7 +176,7 @@ func (m *VoiceManager) SetMemMaps(deps *recallmcp.Deps) {
 // NewVoiceManager creates a VoiceManager. syncer may be nil when k8s is unavailable.
 // allowedOrigin scopes the WebSocket Origin check (empty = allow any, dev only).
 // maxConcurrent caps simultaneous sessions (0 = unlimited).
-func NewVoiceManager(memory *MemoryStore, config *ConfigWatcher, secrets *SecretStore, syncer *CellSyncer, namespace, gcpProject, gcpLocation, geminiKey, voiceModel, voiceName string, userDailyAudioTokenLimit int64, maxOutputTokens, headroomLimit int, affectiveDialog, proactiveAudio bool, allowedOrigin string, maxConcurrent int, logger zerolog.Logger) *VoiceManager {
+func NewVoiceManager(memory *MemoryStore, config *ConfigWatcher, secrets *SecretStore, syncer *CellSyncer, namespace, gcpProject, gcpLocation, geminiKey, voiceModel, voiceName string, userDailyAudioTokenLimit int64, maxOutputTokens, headroomLimit int, affectiveDialog, proactiveAudio, sessionResumption bool, ctxTriggerTokens, ctxTargetTokens int, allowedOrigin string, maxConcurrent int, logger zerolog.Logger) *VoiceManager {
 	return &VoiceManager{
 		sessions:                 make(map[string]*VoiceSession),
 		memory:                   memory,
@@ -191,6 +194,9 @@ func NewVoiceManager(memory *MemoryStore, config *ConfigWatcher, secrets *Secret
 		headroomLimit:            headroomLimit,
 		affectiveDialog:          affectiveDialog,
 		proactiveAudio:           proactiveAudio,
+		sessionResumption:        sessionResumption,
+		ctxTriggerTokens:         ctxTriggerTokens,
+		ctxTargetTokens:          ctxTargetTokens,
 		maxConcurrent:            maxConcurrent,
 		upgrader:                 newWSUpgrader(allowedOrigin),
 		// Allow a small burst of session starts, then ~1 every 6s per key —
@@ -225,6 +231,77 @@ func (m *VoiceManager) effectiveUserDailyLimit() int64 {
 		return crLimit
 	}
 	return m.userDailyAudioTokenLimit
+}
+
+// effectiveSessionResumption reports whether voice sessions resume the upstream
+// Gemini Live session on a GoAway or a dropped connection (ADR-039): the CR
+// SessionResumption when set, else the --voice-session-resumption flag.
+func (m *VoiceManager) effectiveSessionResumption() bool {
+	if v := m.config.Get().SessionResumption; v != nil {
+		return *v
+	}
+	return m.sessionResumption
+}
+
+// Bounds of the context-compression trigger (ADR-039): below the floor the
+// window would be cut on almost every turn, since the system prompt, tool schemas
+// and pinned memory alone take several thousand tokens; above the ceiling it
+// would never fire before the model's own 128k context ends the session.
+const (
+	minContextTriggerTokens = 5_000
+	maxContextTriggerTokens = 128_000
+)
+
+// ValidateContextCompression checks the --voice-context-trigger-tokens and
+// --voice-context-target-tokens pair: a trigger of 0 means compression is off
+// (and a target then has nothing to apply to); otherwise the trigger is within
+// [minContextTriggerTokens, maxContextTriggerTokens] and a non-zero target is
+// below it.
+func ValidateContextCompression(trigger, target int) error {
+	switch {
+	case trigger < 0 || target < 0:
+		return fmt.Errorf("context compression tokens must not be negative (trigger %d, target %d)", trigger, target)
+	case trigger == 0 && target != 0:
+		return fmt.Errorf("a context target of %d tokens needs a trigger: set --voice-context-trigger-tokens", target)
+	case trigger == 0:
+		return nil
+	case trigger < minContextTriggerTokens || trigger > maxContextTriggerTokens:
+		return fmt.Errorf("context trigger %d tokens is outside %d-%d", trigger, minContextTriggerTokens, maxContextTriggerTokens)
+	case target >= trigger && target != 0:
+		return fmt.Errorf("context target %d tokens must be below the trigger %d", target, trigger)
+	}
+	return nil
+}
+
+// contextCompressionConfig builds the Live config for a trigger/target pair, or
+// nil when compression is off. A target of 0 is left out, so the server uses half
+// the trigger. The pair must have passed ValidateContextCompression.
+func contextCompressionConfig(trigger, target int) *genai.ContextWindowCompressionConfig {
+	if trigger <= 0 {
+		return nil
+	}
+	sw := &genai.SlidingWindow{}
+	if target > 0 {
+		sw.TargetTokens = genai.Ptr(int64(target))
+	}
+	return &genai.ContextWindowCompressionConfig{TriggerTokens: genai.Ptr(int64(trigger)), SlidingWindow: sw}
+}
+
+// contextCompression resolves the compression a new session asks for (ADR-039):
+// the CR pair when its trigger is set, else the flags. The CR target applies only
+// with the CR trigger. A CR pair that fails validation is logged and ignored, and
+// the flags (validated at startup) apply, so a bad edit of the configuration
+// cell never reaches Gemini as a rejected setup.
+func (m *VoiceManager) contextCompression(logger zerolog.Logger) *genai.ContextWindowCompressionConfig {
+	trigger, target := m.ctxTriggerTokens, m.ctxTargetTokens
+	if vc := m.config.Get(); vc.ContextTriggerTokens != 0 {
+		if err := ValidateContextCompression(vc.ContextTriggerTokens, vc.ContextTargetTokens); err != nil {
+			logger.Warn().Err(err).Msg("voiceConfig context compression ignored; the flags apply")
+		} else {
+			trigger, target = vc.ContextTriggerTokens, vc.ContextTargetTokens
+		}
+	}
+	return contextCompressionConfig(trigger, target)
 }
 
 // UserQuota reports the per-user daily token quota for the given raw SSO ID.
@@ -342,7 +419,7 @@ func (m *VoiceManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// talking to. Sanitize first (AUDIT F-8): the display name is provider-sourced,
 	// so strip newlines/control chars and cap length to prevent prompt-injection
 	// that overrides the system instruction.
-	if clean := sanitizePromptField(ghUser); clean != "" {
+	if clean := sanitizePromptField(promptName(rawUserID, ghUser)); clean != "" {
 		systemPrompt += "\n\nYou are speaking with " + clean + "."
 	}
 
@@ -362,8 +439,8 @@ func (m *VoiceManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		who := "The user"
-		if ghUser != "" {
-			who = ghUser
+		if name := promptName(rawUserID, ghUser); name != "" {
+			who = name
 		}
 		systemPrompt += "\n\n" + who + " is currently focusing on specific items pinned in their X-Ray view. Call get_pinned_items to retrieve exactly those items when they ask about what they are looking at, their pinned items, or related topics."
 	}
@@ -422,6 +499,7 @@ func (m *VoiceManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if userHash != "" {
 		logCtx = logCtx.Str("user", userHash)
 	}
+	writeAllowed = voiceWriters(writeAllowed, rawUserID, ghUser, userHash)
 	log := logCtx.Logger()
 	remote := r.Header.Get("X-Forwarded-For")
 	if remote == "" {
@@ -437,7 +515,7 @@ func (m *VoiceManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Info().Str("remote", remote).Str("voice", voice).Strs("tools", toolNames).Int("prompt_len", len(systemPrompt)).Msg("voice session started")
 
-	session, err := newVoiceSession(r.Context(), id, ghUser, userHash, writeAllowed, conn, m.memory, m.syncer, genaiClient, liveModel, voice, systemPrompt, greeting, enabledTools, m.config.Get().Categories, pinnedIDs, mcpServers, m.secrets, m.namespace, headroomLimit, m.maxOutputTokens, affectiveDialog, proactiveAudio, m.memMapsDeps, log)
+	session, err := newVoiceSession(r.Context(), id, promptName(rawUserID, ghUser), userHash, writeAllowed, conn, m.memory, m.syncer, genaiClient, liveModel, voice, systemPrompt, greeting, enabledTools, m.config.Get().Categories, pinnedIDs, mcpServers, m.secrets, m.namespace, headroomLimit, m.maxOutputTokens, affectiveDialog, proactiveAudio, m.effectiveSessionResumption(), m.contextCompression(log), m.memMapsDeps, log)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to create voice session")
 		conn.WriteJSON(VoiceServerMessage{Error: fmt.Sprintf("failed to connect to voice model: %v", err)}) //nolint:errcheck
@@ -485,6 +563,93 @@ func (m *VoiceManager) VoiceMetrics() map[string]any {
 
 // ─── VoiceSession ─────────────────────────────────────────────────────────────
 
+// liveConn is the part of *genai.Session a voice session uses. Tests drive a
+// fake one; production passes the genai session.
+type liveConn interface {
+	SendClientContent(genai.LiveClientContentInput) error
+	SendRealtimeInput(genai.LiveRealtimeInput) error
+	SendToolResponse(genai.LiveToolResponseInput) error
+	Receive() (*genai.LiveServerMessage, error)
+	Close() error
+}
+
+// maxResumeAttempts bounds the reconnects one drop may cause (ADR-039, "fail
+// closed after one attempt"). The count resets when a resumed session delivers a
+// message, so a long session can resume at every connection recycle, but a
+// rejected handle or a session that drops again at once ends the session.
+const maxResumeAttempts = 1
+
+// The transparent-replay buffer keeps the client messages the held handle does
+// not cover yet (ADR-039), the newest ones up to about 10 s of microphone audio:
+// the browser sends an 8 ms frame (128 samples, 256 bytes of 16 kHz PCM), so
+// 320,000 bytes is 1,250 frames. Handles arrive only after model turns, so in
+// silence the buffer is always full; past either bound the oldest microphone
+// frames are dropped, which loses silence. Text, audioStreamEnd and tool
+// responses are not dropped for that bound: they stay until a handle covers
+// them, up to their own hard cap (replayMaxContent, replayMaxContentBytes), past
+// which the oldest of them go too, so no client can grow the buffer without
+// limit.
+//
+// A replay never sends that silence, and no audio reaches Gemini faster than real
+// time (paceLocked). Vertex ends a resumed stream that gets audio faster than
+// real time with 429 RESOURCE_EXHAUSTED ("1011 Resource has been exhausted"): on
+// 2026-11-09 two live sessions died that way, replaying 65 s and then 10 s of
+// buffered silence in one burst, while a resume with nothing to replay held.
+const (
+	replayMaxMessages     = 2048
+	replayMaxBytes        = 320_000
+	replayMaxContent      = 256     // messages other than microphone frames
+	replayMaxContentBytes = 1 << 20 // their bytes; a tool response carries search results
+)
+
+// audioLead is how far the microphone audio sent may run ahead of real time
+// before paceLocked holds a frame back: room for the browser's jitter, far below
+// any burst Vertex refused.
+const audioLead = 250 * time.Millisecond
+
+// quietPeak is the loudest sample (16-bit PCM) a microphone frame may have and
+// still count as silence. The browser captures with noise suppression and
+// automatic gain, so silence stays far below it and speech peaks far above; a
+// noise burst that passes it is merely replayed or waited for, never lost.
+const quietPeak = 500
+
+// userSpeechHold is how long after the last frame with speech the user still
+// counts as speaking, so a GoAway in a pause between words waits for the turn.
+const userSpeechHold = 1500 * time.Millisecond
+
+// sentMsg is one client message sent upstream, kept for transparent replay.
+type sentMsg struct {
+	idx   int64         // index on the current connection; the server counts them from 1
+	bytes int           // payload size, for replayMaxBytes
+	audio time.Duration // playing time of a microphone frame, 0 for any other message; replayed at that pace
+	quiet bool          // a microphone frame without speech; a replay skips those before the first one with speech
+	send  func(liveConn) error
+}
+
+// audioMsg is a browser microphone frame (16 kHz, 16-bit mono PCM, so 32 bytes a
+// millisecond) as a client message.
+func audioMsg(pcm []byte) sentMsg {
+	return sentMsg{
+		bytes: len(pcm),
+		audio: time.Duration(len(pcm)) * time.Millisecond / 32,
+		quiet: isQuiet(pcm),
+		send: func(l liveConn) error {
+			return l.SendRealtimeInput(genai.LiveRealtimeInput{Audio: &genai.Blob{MIMEType: audioMIMEType, Data: pcm}})
+		},
+	}
+}
+
+// isQuiet reports whether no sample of the 16-bit little-endian PCM frame reaches
+// quietPeak.
+func isQuiet(pcm []byte) bool {
+	for i := 0; i+1 < len(pcm); i += 2 {
+		if v := int16(uint16(pcm[i]) | uint16(pcm[i+1])<<8); v >= quietPeak || v <= -quietPeak {
+			return false
+		}
+	}
+	return true
+}
+
 // VoiceSession is one active browser ↔ Gemini Live session.
 type VoiceSession struct {
 	id            string
@@ -495,7 +660,7 @@ type VoiceSession struct {
 	memory        *MemoryStore
 	browser       *websocket.Conn
 	writeMu       sync.Mutex // a websocket takes one writer at a time; every write goes through send
-	live          *genai.Session
+	live          liveConn   // swapped by reconnect under liveMu; read without it only by the readFromGemini goroutine
 	tools         []voiceToolDef
 	logger        zerolog.Logger
 	cancel        context.CancelFunc
@@ -509,6 +674,34 @@ type VoiceSession struct {
 
 	liveMu     sync.Mutex
 	mcpClients []*mcpclient.Client // closed when session ends
+
+	// Session resumption (ADR-039). connect opens an upstream session with the
+	// given config; liveConfig is the session's config without resumption fields.
+	connect          func(ctx context.Context, cfg *genai.LiveConnectConfig) (liveConn, error)
+	liveConfig       *genai.LiveConnectConfig
+	resumption       bool         // --voice-session-resumption / CR sessionResumption
+	resumptionHandle string       // latest resumable handle; guarded by liveMu
+	resumeAttempts   atomic.Int32 // reconnects since the last delivered message
+	resumeAtTurnEnd  bool         // GoAway arrived; resume once the current turn ends (readFromGemini goroutine only)
+	resumeAtHandle   bool         // the turn after a GoAway ended; resume on the handle that follows (readFromGemini goroutine only)
+	modelTurnOpen    bool         // the model is answering or running a tool, until TurnComplete or Interrupted (readFromGemini goroutine only)
+	userTurnOpen     bool         // the server transcribed user speech since the last TurnComplete (readFromGemini goroutine only)
+	lastSpeechNano   atomic.Int64 // UnixNano of the last microphone frame with speech
+
+	// Transparent replay (ADR-039), guarded by liveMu. Every client message is
+	// numbered on its connection and kept in replay until a held handle covers it
+	// (the server's LastConsumedClientMessageIndex); a reconnect sends the kept
+	// messages again on the new connection, so nothing the user said is lost.
+	transparent     bool      // resumption on Vertex, the backend that reports consumed indices
+	handleAt        time.Time // when resumptionHandle arrived
+	resumptionIndex int64     // last message index the held handle covers, on the current connection
+	sentSeq         int64     // index of the last client message sent on the current connection
+	replay          []sentMsg // client messages after resumptionIndex, oldest first
+	replayBytes     int
+	replayLost      int       // messages dropped over the bounds since the last reconnect
+	contentCount    int       // kept messages other than microphone frames
+	contentBytes    int       // their bytes
+	audioClock      time.Time // when the microphone audio sent so far ends at real-time pace (paceLocked)
 
 	pinnedMu  sync.RWMutex
 	pinnedIDs []string // updated live when browser sends { pinned: [...] }
@@ -610,7 +803,8 @@ func newVoiceSession(
 	namespace string,
 	headroomLimit int,
 	maxOutputTokens int,
-	affectiveDialog, proactiveAudio bool,
+	affectiveDialog, proactiveAudio, sessionResumption bool,
+	compression *genai.ContextWindowCompressionConfig,
 	memMapsDeps *recallmcp.Deps,
 	logger zerolog.Logger,
 ) (*VoiceSession, error) {
@@ -629,6 +823,17 @@ func newVoiceSession(
 		hangup:           make(chan struct{}),
 		sessionStartTime: time.Now(),
 		pinnedIDs:        pinnedIDs,
+		resumption:       sessionResumption,
+		// The Gemini Developer API rejects SessionResumptionConfig.Transparent at
+		// connect (genai: "only supported in ... Platform mode"); Vertex accepts it.
+		transparent: sessionResumption && genaiClient.ClientConfig().Backend == genai.BackendVertexAI,
+		connect: func(ctx context.Context, cfg *genai.LiveConnectConfig) (liveConn, error) {
+			ls, err := genaiClient.Live.Connect(ctx, liveModel, cfg)
+			if err != nil {
+				return nil, err
+			}
+			return ls, nil
+		},
 	}
 	s.tools = buildVoiceTools(memory, syncer, namespace, username, userHash, writeAllowed, enabledTools, categories, headroomLimit, logger, s.getPinnedIDs, &s.pendingHangup, &s.turnIdle, s.hangup)
 	// Embedded code graph (ADR-046): offer the six code read tools as NATIVE
@@ -682,7 +887,11 @@ func newVoiceSession(
 	if proactiveAudio {
 		liveConfig.Proactivity = &genai.ProactivityConfig{ProactiveAudio: genai.Ptr(true)}
 	}
-	liveSession, err := genaiClient.Live.Connect(ctx, liveModel, liveConfig)
+	// Sliding-window compression of old turns (ADR-039), when configured: lifts the
+	// session-length limit that audio-only sessions have without it.
+	liveConfig.ContextWindowCompression = compression
+	s.liveConfig = liveConfig
+	liveSession, err := s.connect(ctx, s.liveConfigFor(""))
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("connect to Gemini Live: %w", err)
@@ -691,6 +900,260 @@ func newVoiceSession(
 
 	go s.run(sessionCtx)
 	return s, nil
+}
+
+// liveConfigFor returns the session's Live config. With resumption on it asks the
+// server for resumption updates (with the consumed-message index when transparent)
+// and, given a handle, resumes from it; with it off it is the session's config
+// unchanged.
+func (s *VoiceSession) liveConfigFor(handle string) *genai.LiveConnectConfig {
+	cfg := *s.liveConfig
+	if s.resumption {
+		cfg.SessionResumption = &genai.SessionResumptionConfig{Handle: handle, Transparent: s.transparent}
+	}
+	return &cfg
+}
+
+// canResume reports whether a lost upstream session may be resumed: resumption
+// is on, a resumable handle is held, the session is live, and this drop has not
+// used its attempt yet.
+func (s *VoiceSession) canResume(ctx context.Context) bool {
+	s.liveMu.Lock()
+	defer s.liveMu.Unlock()
+	return s.canResumeLocked(ctx)
+}
+
+func (s *VoiceSession) canResumeLocked(ctx context.Context) bool {
+	return s.resumption && s.resumptionHandle != "" && ctx.Err() == nil && s.resumeAttempts.Load() < maxResumeAttempts
+}
+
+// reconnect replaces the upstream session with one resumed from the held handle.
+// It holds liveMu throughout, so a concurrent send waits and then goes to the new
+// session. The new session is opened before the old one is closed, so a failed
+// attempt after a GoAway leaves the old one serving until it ends. The browser
+// WebSocket is not touched. The server restores the conversation from the handle;
+// with transparent replay the client messages the handle does not cover are sent
+// again, in order, before any new send.
+func (s *VoiceSession) reconnect(ctx context.Context, cause string, why error) error {
+	s.liveMu.Lock()
+	defer s.liveMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.resumeAttempts.Add(1)
+	start := time.Now()
+	ls, err := s.connect(ctx, s.liveConfigFor(s.resumptionHandle))
+	if err != nil {
+		s.logger.Warn().Err(err).Str("cause", cause).AnErr("trigger", why).Msg("gemini session resume failed")
+		return err
+	}
+	took := time.Since(start)
+	s.live.Close() //nolint:errcheck // the old session is done either way
+	s.live = ls
+	s.resumeAtTurnEnd, s.resumeAtHandle = false, false // a GoAway waiting for the end of the turn is served by this reconnect
+	lost := s.replayLost
+	msgs, bytes, skipped, rerr := s.replayLocked(ctx)
+	if rerr != nil {
+		s.logger.Warn().Err(rerr).Str("cause", cause).Msg("gemini replay failed; the rest is kept for the next reconnect")
+	}
+	s.logger.Info().Str("cause", cause).AnErr("trigger", why).Dur("took", took).Dur("handle_age", start.Sub(s.handleAt)).
+		Int("replayed", msgs).Int("replayed_bytes", bytes).Int("skipped_silent", skipped).Int("lost_over_bound", lost).Msg("gemini session resumed")
+	if s.traceCtx != nil {
+		oteltrace.SpanFromContext(s.traceCtx).AddEvent("voice.resumed", oteltrace.WithAttributes(attribute.String("cause", cause), attribute.Int("replayed", msgs)))
+	}
+	return nil
+}
+
+// sendLocked sends one client message on the current upstream session. With
+// transparent replay the message is numbered and kept first, so a send that fails
+// on a dropped connection is sent again after the reconnect. The caller holds
+// liveMu.
+func (s *VoiceSession) sendLocked(bytes int, send func(liveConn) error) error {
+	return s.sendMsgLocked(context.Background(), sentMsg{bytes: bytes, send: send})
+}
+
+// sendMsgLocked is sendLocked for a message built whole (audioMsg). A microphone
+// frame goes through paceLocked first: it may wait, or, when silent and behind,
+// be dropped (nil error). A cancelled ctx while waiting returns its error. The
+// caller holds liveMu.
+func (s *VoiceSession) sendMsgLocked(ctx context.Context, m sentMsg) error {
+	if !s.paceLocked(ctx, m) {
+		return ctx.Err()
+	}
+	if s.transparent {
+		s.keepLocked(m)
+	}
+	return m.send(s.live)
+}
+
+// paceLocked keeps microphone audio at real-time pace: the frames sent so far may
+// run at most audioLead ahead of the clock, and a frame that would run further
+// waits. A silent frame that would wait is dropped instead, so a backlog (the
+// browser frames that queued behind a replay) drains in the next silence rather
+// than going out as a burst. Other messages pass at once. It reports whether to
+// send m: false for a dropped frame, or when ctx ends while waiting. The caller
+// holds liveMu.
+func (s *VoiceSession) paceLocked(ctx context.Context, m sentMsg) bool {
+	if m.audio <= 0 {
+		return true
+	}
+	now := time.Now()
+	if s.audioClock.Before(now) {
+		s.audioClock = now
+	}
+	if wait := s.audioClock.Sub(now) - audioLead; wait > 0 {
+		if m.quiet {
+			return false
+		}
+		t := time.NewTimer(wait)
+		defer t.Stop()
+		select {
+		case <-ctx.Done():
+			return false
+		case <-t.C:
+		}
+	}
+	s.audioClock = s.audioClock.Add(m.audio)
+	return true
+}
+
+// sendLive runs one send on the current upstream session under liveMu.
+func (s *VoiceSession) sendLive(bytes int, send func(liveConn) error) error {
+	s.liveMu.Lock()
+	defer s.liveMu.Unlock()
+	return s.sendLocked(bytes, send)
+}
+
+// keepLocked numbers a client message on the current connection and keeps it for
+// replay. Past replayMaxMessages or replayMaxBytes the oldest microphone frames
+// are dropped; other messages stay, unless they alone pass replayMaxContent or
+// replayMaxContentBytes, and then the oldest of them go. Every drop is counted in
+// replayLost, which a reconnect reports. The caller holds liveMu.
+func (s *VoiceSession) keepLocked(m sentMsg) {
+	s.sentSeq++
+	m.idx = s.sentSeq
+	s.replay = append(s.replay, m)
+	s.replayBytes += m.bytes
+	if m.audio <= 0 {
+		s.contentCount++
+		s.contentBytes += m.bytes
+	}
+	audio := len(s.replay) - s.contentCount
+	audioOver := func() bool { return audio > replayMaxMessages || s.replayBytes-s.contentBytes > replayMaxBytes }
+	contentOver := func() bool {
+		return s.contentCount > replayMaxContent || s.contentBytes > replayMaxContentBytes
+	}
+	if !audioOver() && !contentOver() {
+		return
+	}
+	out := s.replay[:0]
+	for _, k := range s.replay {
+		switch {
+		case k.audio > 0 && audioOver():
+			audio--
+		case k.audio <= 0 && contentOver():
+			s.contentCount--
+			s.contentBytes -= k.bytes
+		default:
+			out = append(out, k)
+			continue
+		}
+		s.replayBytes -= k.bytes
+		s.replayLost++
+	}
+	clear(s.replay[len(out):])
+	s.replay = out
+}
+
+// holdHandleLocked stores a resumable handle and drops the kept messages it
+// covers: those up to the server's LastConsumedClientMessageIndex. An update
+// without the index (the server ignored transparent) is taken to cover them all,
+// so a reconnect never resends what the handle already holds. The caller holds
+// liveMu.
+func (s *VoiceSession) holdHandleLocked(u *genai.LiveServerSessionResumptionUpdate) {
+	s.resumptionHandle, s.handleAt = u.NewHandle, time.Now()
+	if !s.transparent {
+		return
+	}
+	last := u.LastConsumedClientMessageIndex
+	if last > s.sentSeq {
+		// Never expected: the server counts from 1 per connection, as we do.
+		s.logger.Warn().Int64("last_consumed", last).Int64("sent", s.sentSeq).Msg("gemini resumption index ahead of the messages sent on this connection")
+	}
+	if last == 0 {
+		// Absent and 0 are the same on the wire (proto3). A real 0 with messages
+		// sent would need a handle issued before the server consumed any of
+		// them; the greeting, when set, is message 1 and is consumed at once.
+		last = s.sentSeq
+	}
+	s.resumptionIndex = last
+	n := 0
+	for n < len(s.replay) && s.replay[n].idx <= last {
+		s.replayBytes -= s.replay[n].bytes
+		if s.replay[n].audio <= 0 {
+			s.contentCount--
+			s.contentBytes -= s.replay[n].bytes
+		}
+		n++
+	}
+	clear(s.replay[:n])
+	s.replay = s.replay[n:]
+}
+
+// replayLocked sends the kept messages again on the session reconnect has just
+// installed, in order, from the first one that is not a silent microphone frame:
+// silence before it carries nothing. Audio goes through paceLocked like any
+// other, so the speech goes out at the pace it was spoken, never as a burst (see
+// replayMaxBytes). A new connection counts its messages from 1 and the held
+// handle predates it, so they are numbered again and kept as they are sent; after
+// a failed send, or when ctx ends, the rest are kept unsent for the next
+// reconnect. The caller holds liveMu, so new browser frames wait behind the
+// replay and are paced after it.
+func (s *VoiceSession) replayLocked(ctx context.Context) (msgs, bytes, skipped int, err error) {
+	kept := s.replay
+	s.replay, s.replayBytes, s.sentSeq, s.resumptionIndex, s.replayLost = nil, 0, 0, 0, 0
+	s.contentCount, s.contentBytes = 0, 0
+	for skipped < len(kept) && kept[skipped].quiet {
+		skipped++
+	}
+	for _, m := range kept[skipped:] {
+		if err != nil {
+			s.keepLocked(m)
+			continue
+		}
+		before := s.sentSeq
+		if err = s.sendMsgLocked(ctx, m); err == nil {
+			if s.sentSeq > before { // not a silent frame paceLocked dropped
+				msgs, bytes = msgs+1, bytes+m.bytes
+			}
+		} else if ctx.Err() != nil {
+			s.keepLocked(m)
+		}
+	}
+	return msgs, bytes, skipped, err
+}
+
+// liveSend runs one send of a browser frame on the current upstream session. A
+// send that fails while the session can resume, or that hit a session a reconnect
+// has since replaced, does not end the session: the reader sees the same broken
+// connection and reconnects, and with transparent replay the frame is sent again
+// on the new connection (otherwise it is lost).
+func (s *VoiceSession) liveSend(ctx context.Context, m sentMsg) error {
+	s.liveMu.Lock()
+	live := s.live
+	err := s.sendMsgLocked(ctx, m)
+	s.liveMu.Unlock()
+	if err == nil {
+		return nil
+	}
+	s.liveMu.Lock()
+	recoverable := s.live != live || s.canResumeLocked(ctx)
+	s.liveMu.Unlock()
+	if recoverable {
+		s.logger.Debug().Err(err).Bool("kept", s.transparent).Msg("browser frame not delivered: upstream send failed, resuming")
+		return nil
+	}
+	return err
 }
 
 // liveSupportsAffectiveDialog reports whether a Live model accepts
@@ -747,7 +1210,6 @@ func (s *VoiceSession) run(ctx context.Context) {
 		for _, c := range s.mcpClients {
 			c.Close() //nolint:errcheck
 		}
-		s.send(VoiceServerMessage{Done: true}) //nolint:errcheck
 		close(s.done)
 	}()
 
@@ -769,20 +1231,22 @@ func (s *VoiceSession) run(ctx context.Context) {
 	// Send greeting after both goroutines are running so readFromGemini
 	// is ready to receive the model's audio response.
 	if s.greeting != "" {
-		s.liveMu.Lock()
-		err := s.live.SendClientContent(genai.LiveSendClientContentParameters{
-			Turns: []*genai.Content{genai.NewContentFromText(s.greeting, "user")},
+		err := s.sendLive(len(s.greeting), func(l liveConn) error {
+			return l.SendClientContent(genai.LiveSendClientContentParameters{
+				Turns: []*genai.Content{genai.NewContentFromText(s.greeting, "user")},
+			})
 		})
-		s.liveMu.Unlock()
 		if err != nil {
 			s.logger.Warn().Err(err).Msg("failed to send greeting")
 		}
 	}
 
+	closeCode, closeReason := websocket.CloseNormalClosure, "session ended"
 	select {
 	case err := <-errCh:
 		if err != nil {
 			s.logger.Error().Err(err).Msg("session error")
+			closeCode, closeReason = websocket.CloseInternalServerErr, "voice model connection failed"
 		}
 	case <-s.hangup:
 		s.logger.Info().Msg("end_session tool triggered hangup")
@@ -790,8 +1254,22 @@ func (s *VoiceSession) run(ctx context.Context) {
 	}
 
 	s.cancel()
+	s.liveMu.Lock() // a reconnect in flight finishes first; its new session is the one closed
 	s.live.Close()
+	s.liveMu.Unlock()
+	s.closeBrowser(closeCode, closeReason)
 	wg.Wait()
+}
+
+// closeBrowser tells the browser the session is over: Done, then a close frame
+// with code, then the socket is closed. Closing it also returns readFromBrowser
+// from its blocking read at once, rather than on the browser's next frame.
+func (s *VoiceSession) closeBrowser(code int, reason string) {
+	s.send(VoiceServerMessage{Done: true}) //nolint:errcheck
+	// WriteControl may run beside other writers (gorilla/websocket), so it does
+	// not wait behind a write stuck on a dead browser.
+	_ = s.browser.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason), time.Now().Add(time.Second))
+	_ = s.browser.Close()
 }
 
 func (s *VoiceSession) readFromBrowser(ctx context.Context) error {
@@ -822,9 +1300,9 @@ func (s *VoiceSession) readFromBrowser(ctx context.Context) error {
 			// Anchor TTFT: user finished speaking; measure until first model audio.
 			s.userInputEndNano.Store(time.Now().UnixNano())
 			s.ttftPending.Store(true)
-			s.liveMu.Lock()
-			err := s.live.SendRealtimeInput(genai.LiveRealtimeInput{AudioStreamEnd: true})
-			s.liveMu.Unlock()
+			err := s.liveSend(ctx, sentMsg{send: func(l liveConn) error {
+				return l.SendRealtimeInput(genai.LiveRealtimeInput{AudioStreamEnd: true})
+			}})
 			if err != nil {
 				return fmt.Errorf("send audio stream end: %w", err)
 			}
@@ -832,22 +1310,22 @@ func (s *VoiceSession) readFromBrowser(ctx context.Context) error {
 		}
 
 		if len(msg.Audio) > 0 {
-			s.liveMu.Lock()
-			err := s.live.SendRealtimeInput(genai.LiveRealtimeInput{
-				Audio: &genai.Blob{MIMEType: audioMIMEType, Data: msg.Audio},
-			})
-			s.liveMu.Unlock()
+			m := audioMsg(msg.Audio)
+			if !m.quiet {
+				s.lastSpeechNano.Store(time.Now().UnixNano())
+			}
+			err := s.liveSend(ctx, m)
 			if err != nil {
 				return fmt.Errorf("send audio: %w", err)
 			}
 		}
 
 		if msg.Text != "" {
-			s.liveMu.Lock()
-			err := s.live.SendClientContent(genai.LiveSendClientContentParameters{
-				Turns: []*genai.Content{genai.NewContentFromText(msg.Text, "user")},
-			})
-			s.liveMu.Unlock()
+			err := s.liveSend(ctx, sentMsg{bytes: len(msg.Text), send: func(l liveConn) error {
+				return l.SendClientContent(genai.LiveSendClientContentParameters{
+					Turns: []*genai.Content{genai.NewContentFromText(msg.Text, "user")},
+				})
+			}})
 			if err != nil {
 				return fmt.Errorf("send text: %w", err)
 			}
@@ -865,7 +1343,20 @@ func (s *VoiceSession) readFromGemini(ctx context.Context) error {
 
 		msg, err := s.live.Receive()
 		if err != nil {
+			// A connection recycle without a GoAway, or a drop without a close
+			// frame: resume from the held handle instead of ending (ADR-039).
+			if s.canResume(ctx) {
+				if rerr := s.reconnect(ctx, "receive error", err); rerr == nil {
+					continue
+				}
+			}
 			return fmt.Errorf("gemini receive: %w", err)
+		}
+		if msg.ServerContent != nil || msg.ToolCall != nil {
+			// The session delivers again: a later drop gets its own attempt. Only
+			// content counts; a setup or a resumption update alone does not, so a
+			// connection that keeps failing right after them is not retried forever.
+			s.resumeAttempts.Store(0)
 		}
 		if err := s.handleGeminiMessage(ctx, msg); err != nil {
 			return err
@@ -874,7 +1365,28 @@ func (s *VoiceSession) readFromGemini(ctx context.Context) error {
 }
 
 func (s *VoiceSession) handleGeminiMessage(ctx context.Context, msg *genai.LiveServerMessage) error {
+	if u := msg.SessionResumptionUpdate; u != nil {
+		s.logger.Debug().Bool("resumable", u.Resumable).Int64("last_consumed", u.LastConsumedClientMessageIndex).Msg("gemini resumption update")
+		if u.Resumable && u.NewHandle != "" {
+			s.liveMu.Lock()
+			s.holdHandleLocked(u)
+			s.liveMu.Unlock()
+			if s.resumeAtHandle {
+				// The turn after a GoAway has ended and this handle covers it.
+				s.resumeAtHandle = false
+				if s.canResume(ctx) {
+					s.reconnect(ctx, "goaway", nil) //nolint:errcheck // logged; the old session serves until it ends
+				}
+			}
+		}
+	}
+
+	if msg.GoAway != nil {
+		s.handleGoAway(ctx, msg.GoAway)
+	}
+
 	if msg.ToolCall != nil {
+		s.modelTurnOpen = true
 		return s.handleToolCall(ctx, msg.ToolCall)
 	}
 
@@ -882,12 +1394,14 @@ func (s *VoiceSession) handleGeminiMessage(ctx context.Context, msg *genai.LiveS
 		sc := msg.ServerContent
 
 		if sc.Interrupted {
+			s.modelTurnOpen = false // the user spoke over the answer; the model stopped
 			if err := s.send(VoiceServerMessage{Interrupt: true}); err != nil {
 				return fmt.Errorf("write interrupt: %w", err)
 			}
 		}
 
 		if sc.ModelTurn != nil {
+			s.modelTurnOpen = true
 			for _, part := range sc.ModelTurn.Parts {
 				if part.InlineData != nil && len(part.InlineData.Data) > 0 {
 					s.turnHadAudio.Store(true)
@@ -938,6 +1452,7 @@ func (s *VoiceSession) handleGeminiMessage(ctx context.Context, msg *genai.LiveS
 			// streams continuously and never sends it).
 			s.userInputEndNano.Store(time.Now().UnixNano())
 			s.ttftPending.Store(true)
+			s.userTurnOpen = true
 			s.turnMu.Lock()
 			s.turnInput.WriteString(sc.InputTranscription.Text)
 			s.turnMu.Unlock()
@@ -947,9 +1462,15 @@ func (s *VoiceSession) handleGeminiMessage(ctx context.Context, msg *genai.LiveS
 		}
 
 		if sc.TurnComplete {
+			s.modelTurnOpen, s.userTurnOpen = false, false
 			s.turnTools.Store(0)
 			s.turnHadAudio.Store(false) // reset for next turn
 			s.turnIdle.Store(true)
+			if s.resumeAtTurnEnd {
+				// The handle that covers this turn follows the TurnComplete in its
+				// own message; the held one predates the turn. Resume on that one.
+				s.resumeAtTurnEnd, s.resumeAtHandle = false, true
+			}
 			if s.pendingHangup.Load() {
 				// Hang up once a turn completes with the hangup pending (the model
 				// ended without a tool call of its own to intercept; see
@@ -965,6 +1486,32 @@ func (s *VoiceSession) handleGeminiMessage(ctx context.Context, msg *genai.LiveS
 	}
 
 	return nil
+}
+
+// handleGoAway handles the server's notice that it will close the connection in
+// g.TimeLeft (30–60 s; Gemini Live recycles a connection about every 10
+// minutes). It is logged and recorded on the session span. With resumption
+// possible and nobody speaking the session reconnects at once; the replay then
+// has only silence to skip. While the user is speaking (a frame with speech in the
+// last userSpeechHold, or speech transcribed since the last TurnComplete) or the
+// model is answering or running a tool, it waits for the end of that turn, so
+// neither the question nor the answer is cut, and resumes on the handle that
+// covers the turn, with nothing left to replay. If the connection ends first, the
+// receive-error path resumes it and replays the speech at its own pace. Without
+// resumption the connection ends as before (ADR-039).
+func (s *VoiceSession) handleGoAway(ctx context.Context, g *genai.LiveServerGoAway) {
+	resume := s.canResume(ctx)
+	s.logger.Warn().Dur("time_left", g.TimeLeft).Bool("resume", resume).Msg("gemini goaway")
+	if s.traceCtx != nil {
+		oteltrace.SpanFromContext(s.traceCtx).AddEvent("voice.goaway", oteltrace.WithAttributes(attribute.Int64("time_left_ms", g.TimeLeft.Milliseconds())))
+	}
+	switch {
+	case !resume:
+	case s.modelTurnOpen || s.userTurnOpen || time.Since(time.Unix(0, s.lastSpeechNano.Load())) < userSpeechHold:
+		s.resumeAtTurnEnd = true
+	default:
+		s.reconnect(ctx, "goaway", nil) //nolint:errcheck // logged; the old session serves until it ends
+	}
 }
 
 // shouldTriggerLimitFarewell reports whether the over-limit goodbye should be
@@ -1040,13 +1587,12 @@ func (s *VoiceSession) pushQuota() {
 	// playing. Injected exactly once per session.
 	if s.shouldTriggerLimitFarewell(remaining) {
 		s.logger.Info().Int64("used", used).Int64("limit", s.userDailyLimit).Msg("daily token limit reached mid-session — prompting save + farewell + end_session")
-		s.liveMu.Lock()
-		err := s.live.SendClientContent(genai.LiveSendClientContentParameters{
-			Turns: []*genai.Content{genai.NewContentFromText(
-				"SYSTEM: The user has reached their daily token limit and the session must end now. First, if this conversation produced anything worth remembering, save it with save_memory (kind=episodic) — do not skip this just because the session is ending. Then say a brief, polite goodbye explaining the daily limit is reached, and call end_session immediately.",
-				"user")},
+		const farewell = "SYSTEM: The user has reached their daily token limit and the session must end now. First, if this conversation produced anything worth remembering, save it with save_memory (kind=episodic) — do not skip this just because the session is ending. Then say a brief, polite goodbye explaining the daily limit is reached, and call end_session immediately."
+		err := s.sendLive(len(farewell), func(l liveConn) error {
+			return l.SendClientContent(genai.LiveSendClientContentParameters{
+				Turns: []*genai.Content{genai.NewContentFromText(farewell, "user")},
+			})
 		})
-		s.liveMu.Unlock()
 		if err != nil {
 			s.logger.Warn().Err(err).Msg("failed to inject over-limit farewell — forcing hangup")
 			s.pendingHangup.Store(true)
@@ -1308,6 +1854,7 @@ func (s *VoiceSession) handleToolCall(ctx context.Context, tc *genai.LiveServerT
 	type result struct {
 		idx  int
 		resp *genai.FunctionResponse
+		size int // bytes of the result text, for the replay bound
 	}
 
 	n := len(tc.FunctionCalls)
@@ -1365,6 +1912,7 @@ func (s *VoiceSession) handleToolCall(ctx context.Context, tc *genai.LiveServerT
 					Name:     fc.Name,
 					Response: map[string]any{"result": resultStr},
 				},
+				size: len(resultStr),
 			}
 		}()
 	}
@@ -1383,14 +1931,15 @@ func (s *VoiceSession) handleToolCall(ctx context.Context, tc *genai.LiveServerT
 	}
 
 	responses := make([]*genai.FunctionResponse, n)
+	size := 0
 	for _, r := range results {
 		responses[r.idx] = r.resp
+		size += r.size
 	}
 
-	s.liveMu.Lock()
-	err := s.live.SendToolResponse(genai.LiveToolResponseInput{FunctionResponses: responses})
-	s.liveMu.Unlock()
-	return err
+	return s.sendLive(size, func(l liveConn) error {
+		return l.SendToolResponse(genai.LiveToolResponseInput{FunctionResponses: responses})
+	})
 }
 
 // Close cancels the session and waits for cleanup.

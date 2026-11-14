@@ -309,29 +309,31 @@ func printRouting(w io.Writer, vec []float32, n int, asJSON bool) error {
 // headerJSON is the -header -json / summary "header" shape. Vectors and
 // HNSWBytes are -1 when the body was not read (header-only mode).
 type headerJSON struct {
-	Label         string    `json:"label"`
-	Repo          string    `json:"repo"`
-	Built         time.Time `json:"built"`
-	Model         string    `json:"model"`
-	Dims          int       `json:"dims"`
-	MaxInputChars int       `json:"maxInputChars"`
-	Nodes         int       `json:"nodes"`
-	Edges         int       `json:"edges"`
-	Vectors       int       `json:"vectors"`
-	HNSWBytes     int       `json:"hnswBytes"`
-	SummarySource string    `json:"summarySource"`
-	Facts         int       `json:"facts"`
-	NoEmbed       bool      `json:"noEmbed"`
-	Summary       string    `json:"summary"`
-	RoutingDims   int       `json:"routingDims"`
-	RoutingNorm   float64   `json:"routingNorm"`
-	RoutingHead   []float32 `json:"routingHead"`
+	Label          string    `json:"label"`
+	Repo           string    `json:"repo"`
+	Built          time.Time `json:"built"`
+	Model          string    `json:"model"`
+	Dims           int       `json:"dims"`
+	MaxInputChars  int       `json:"maxInputChars"`
+	MaxInputTokens int       `json:"maxInputTokens"`
+	Nodes          int       `json:"nodes"`
+	Edges          int       `json:"edges"`
+	Vectors        int       `json:"vectors"`
+	HNSWBytes      int       `json:"hnswBytes"`
+	SummarySource  string    `json:"summarySource"`
+	Facts          int       `json:"facts"`
+	NoEmbed        bool      `json:"noEmbed"`
+	Summary        string    `json:"summary"`
+	RoutingDims    int       `json:"routingDims"`
+	RoutingNorm    float64   `json:"routingNorm"`
+	RoutingHead    []float32 `json:"routingHead"`
 }
 
 func dumpHeaderJSON(h *engine.SnapshotHeader, vectors, hnswBytes, n int) headerJSON {
 	return headerJSON{
 		Label: h.Label, Repo: h.RepoPath, Built: h.BuiltAt,
-		Model: h.Fingerprint.Model, Dims: h.Fingerprint.Dims, MaxInputChars: h.Fingerprint.MaxInputChars,
+		Model: h.Fingerprint.Model, Dims: h.Fingerprint.Dims,
+		MaxInputChars: h.Fingerprint.MaxInputChars, MaxInputTokens: h.Fingerprint.MaxInputTokens,
 		Nodes: h.Nodes, Edges: h.Edges, Vectors: vectors, HNSWBytes: hnswBytes,
 		SummarySource: h.SummarySource, Facts: h.Facts, NoEmbed: h.NoEmbed, Summary: h.Summary,
 		RoutingDims: len(h.SummaryVec), RoutingNorm: vecNorm(h.SummaryVec), RoutingHead: vecHead(h.SummaryVec, n),
@@ -358,6 +360,7 @@ func printDumpHeader(w io.Writer, h *engine.SnapshotHeader, vectors, hnswBytes, 
 	fmt.Fprintf(w, "model:          %s\n", h.Fingerprint.Model)
 	fmt.Fprintf(w, "dims:           %d\n", h.Fingerprint.Dims)
 	fmt.Fprintf(w, "maxInputChars:  %d\n", h.Fingerprint.MaxInputChars)
+	fmt.Fprintf(w, "maxInputTokens: %d\n", h.Fingerprint.MaxInputTokens)
 	fmt.Fprintf(w, "nodes:          %d\n", h.Nodes)
 	fmt.Fprintf(w, "edges:          %d\n", h.Edges)
 	fmt.Fprintf(w, "vectors:        %s\n", count(vectors))

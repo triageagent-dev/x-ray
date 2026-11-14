@@ -88,7 +88,7 @@ func (g *googleAuth) callbackURL() string { return g.cfg.PublicURL + "/v1/auth/g
 
 func (g *googleAuth) handleLogin(w http.ResponseWriter, r *http.Request) {
 	state := g.newState(resolveUIOrigin(r.URL.Query().Get("ui"), g.cfg.UICallbackOrigins))
-	setStateCookie(w, state)
+	setStateCookie(w, BasePath(g.cfg.PublicURL), state)
 	q := url.Values{
 		"client_id":     {g.cfg.ClientID},
 		"response_type": {"code"},
@@ -107,7 +107,7 @@ func (g *googleAuth) handleCallback(w http.ResponseWriter, r *http.Request) {
 	state := r.URL.Query().Get("state")
 	code := r.URL.Query().Get("code")
 
-	clearStateCookie(w)
+	clearStateCookie(w, BasePath(g.cfg.PublicURL))
 	if !stateCookieMatches(r, state) {
 		http.Error(w, "invalid state", http.StatusBadRequest)
 		return
@@ -124,7 +124,7 @@ func (g *googleAuth) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	login, sub, err := g.identity(idToken, time.Now())
-	if err != nil {
+	if err != nil || !grants.allowsUser("google:"+sub, login) {
 		http.Error(w, "this Google account may not sign in", http.StatusForbidden)
 		return
 	}
@@ -134,13 +134,13 @@ func (g *googleAuth) handleCallback(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     "xray_session",
 		Value:    token,
-		Path:     "/",
+		Path:     BasePath(g.cfg.PublicURL) + "/",
 		MaxAge:   86400,
 		HttpOnly: true,
 		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
 	})
-	http.Redirect(w, r, uiCallbackRedirect(st.uiOrigin, token), http.StatusFound)
+	http.Redirect(w, r, uiCallbackRedirect(st.uiOrigin, token, BasePath(g.cfg.PublicURL)), http.StatusFound)
 }
 
 // exchangeCode trades the authorization code for the ID token.
@@ -177,7 +177,7 @@ func (g *googleAuth) exchangeCode(code string) (string, error) {
 	return tok.IDToken, nil
 }
 
-// identity checks the ID token's claims and returns (login, sub). The token comes
+// identity checks the ID token's claims and returns (address, sub). The token comes
 // straight from Google's token endpoint over TLS, so its signature is not
 // re-verified (OpenID Connect Core 3.1.3.7); issuer, audience and expiry still are.
 // The domain is enforced on hd, which Google sets only for Workspace accounts: an
@@ -217,6 +217,11 @@ func (g *googleAuth) identity(idToken string, now time.Time) (string, string, er
 	case g.cfg.Domain != "" && !strings.EqualFold(c.HD, g.cfg.Domain):
 		return "", "", fmt.Errorf("account is not in the %s workspace", g.cfg.Domain)
 	}
-	login, _, _ := strings.Cut(c.Email, "@")
-	return login, c.Sub, nil
+	// The full address: deployments grant access by it (ADR-066). A non-ASCII one is
+	// returned as issued: lower-casing would fold the Kelvin sign into "k" before the
+	// grants see it (principalOf).
+	if !isASCII(c.Email) {
+		return c.Email, c.Sub, nil
+	}
+	return strings.ToLower(c.Email), c.Sub, nil
 }

@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"flag"
 	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -72,6 +74,7 @@ func main() {
 		embedModel                string
 		embedDims                 int
 		embedMaxInputChars        int
+		embedMaxInputTokens       int
 		semanticScoreGap          float64
 		searchLexicalShortCircuit bool
 		searchRecallShaping       bool
@@ -92,6 +95,9 @@ func main() {
 		headroomLimit             int
 		affectiveDialog           bool
 		proactiveAudio            bool
+		voiceSessionResumption    bool
+		voiceContextTriggerTokens int
+		voiceContextTargetTokens  int
 		maxConcurrentVoice        int
 		maxRequestBytes           int64
 		mcpListMemoryMaxLimit     int
@@ -101,6 +107,7 @@ func main() {
 		otelTokenSecret           string
 		registryPullSecret        string
 		otelProject               string
+		otelServiceName           string
 		githubClientID            string
 		githubClientSecret        string
 		githubOrg                 string
@@ -113,11 +120,15 @@ func main() {
 		googleClientID            string
 		googleClientSecret        string
 		googleDomain              string
+		accessUsers               string
+		accessAdmins              string
 		dev                       bool
 		allowAnyUser              bool
 		mcpOAuth                  bool
 		mcpResourceURL            string
 		mcpTokenTTL               time.Duration
+		mcpStaticClientID         string
+		mcpStaticClientRedirects  string
 		episodicTTL               time.Duration
 		retentionSweepInterval    time.Duration
 		trustedProxyHops          int
@@ -132,12 +143,13 @@ func main() {
 	flag.StringVar(&embedEndpoint, "embedding-endpoint", "", "OpenAI-compatible embedding endpoint (enables HNSW semantic memory)")
 	flag.StringVar(&embedModel, "embedding-model", "gemini-embedding-001", "Embedding model name")
 	flag.IntVar(&embedDims, "embedding-dims", 128, "Reduced output dimensionality (Vertex AI native, or gateway via OpenAI \"dimensions\" param for MRL models; 0 = model default)")
-	flag.IntVar(&embedMaxInputChars, "embedding-max-input-chars", 0, "Hard cap on embed input length in chars before the API call (0 = default 8000, ~2000 tokens). Set below the model's token window × ~4 for small-context gateway/sidecar models to avoid status-400 rejections.")
+	flag.IntVar(&embedMaxInputChars, "embedding-max-input-chars", 0, "Hard cap on embed input length in chars before the API call (0 = default 8000, ~2000 tokens). Set below the model's token window × ~4 for small-context gateway/sidecar models; bytes per token vary with the text, so this is a bound, and --embedding-max-input-tokens is the fit.")
+	flag.IntVar(&embedMaxInputTokens, "embedding-max-input-tokens", 0, "The gateway model's input window in tokens (0 = unknown); an input over it is cut to the longest prefix that fits, counted by the endpoint's own tokenizer (llama.cpp POST /tokenize). nomic-embed-text-v2-moe reads 512.")
 	flag.Float64Var(&semanticScoreGap, "semantic-score-gap", 0, "Semantic relevance cutoff: drop results more than this absolute cosine gap below the top hit (0, the default, disables the cutoff; 0.02 was the previous default)")
 	flag.BoolVar(&searchRecallShaping, "search-recall-shaping", true, "Collapse near-duplicate facts in Search results and re-rank by state (an active watch_item first, a mild recency decay); false returns the fused order unchanged")
 	flag.BoolVar(&memoryWriteDedup, "memory-write-dedup", true, "Land an upsert that restates a stable_fact, operational_pattern, watch_item or hypothesis on the cell it repeats instead of minting a second one")
 	flag.BoolVar(&searchLexicalShortCircuit, "search-lexical-shortcircuit", false, "Let a full-coverage keyword hit short-circuit Search and skip semantic retrieval (previous behaviour); default false always fuses keyword and semantic results by RRF")
-	flag.StringVar(&memMapsDir, "mental-maps-dir", "", "Directory of *.graph.gob.gz mental maps (code, service, or other graphs) to serve as NATIVE voice tools (search_graph etc.; ADR-045; empty = off). Requires --embedding-endpoint; --embedding-dims/--embedding-max-input-chars must match the maps' fingerprint.")
+	flag.StringVar(&memMapsDir, "mental-maps-dir", "", "Directory of *.graph.gob.gz mental maps (code, service, or other graphs) to serve as NATIVE voice tools (search_graph etc.; ADR-045; empty = off). Requires --embedding-endpoint; --embedding-dims/--embedding-max-input-chars/--embedding-max-input-tokens must match the maps' fingerprint.")
 	flag.IntVar(&memMapsRouteFanout, "mental-maps-route-fanout", 1, "Number of maps a semantic (no explicit map) graph search consults")
 	flag.StringVar(&memMapsKeyFile, "mental-maps-snapshot-key", "", "age identity file (from `xray graph keygen`) that opens encrypted snapshots in --mental-maps-dir; a map read encrypted stays encrypted when flushed. Default $XRAY_SNAPSHOT_KEY")
 	flag.IntVar(&memMapsTTLMin, "mental-maps-ttl-min", 0, "Evict a map's in-memory graph after this many idle MINUTES (0 = never; reloads from the .gob on next use)")
@@ -153,6 +165,9 @@ func main() {
 	flag.IntVar(&headroomLimit, "headroom-content-limit", 0, "Max chars per search-result item content after markdown-noise stripping; bounds LLM context cost (0 = disabled; CR maxItemContentChars overrides). See ADR-038")
 	flag.BoolVar(&affectiveDialog, "voice-affective-dialog", false, "Enable Gemini Live affective dialog: model detects emotional tone and adapts responses (native-audio only)")
 	flag.BoolVar(&proactiveAudio, "voice-proactive-audio", false, "Enable Gemini Live proactive audio: model may stay silent on out-of-context/background speech (native-audio only)")
+	flag.BoolVar(&voiceSessionResumption, "voice-session-resumption", false, "Resume the Gemini Live session with its latest resumption handle on a GoAway or a dropped connection, keeping the browser connected (CR sessionResumption overrides). See ADR-039")
+	flag.IntVar(&voiceContextTriggerTokens, "voice-context-trigger-tokens", 0, "Gemini Live sliding-window context compression: once a voice session's context passes this many tokens the oldest turns are dropped (5000-128000; 0 = off; CR contextTriggerTokens overrides). See ADR-039")
+	flag.IntVar(&voiceContextTargetTokens, "voice-context-target-tokens", 0, "Size the context window is cut to when compression runs, below --voice-context-trigger-tokens (0 = the server's default, half the trigger; CR contextTargetTokens overrides). See ADR-039")
 	flag.Int64Var(&maxRequestBytes, "max-request-bytes", 1<<20, "Max request body size in bytes for non-WebSocket endpoints (0 = unlimited)")
 	flag.IntVar(&mcpListMemoryMaxLimit, "mcp-list-memory-max-limit", xray.DefaultMCPListMemoryMaxLimit, "Hard ceiling on list_memory's limit param, regardless of what the MCP caller requests. See ADR-051")
 	flag.IntVar(&mcpSearchMemoryMaxLimit, "mcp-search-memory-max-limit", xray.DefaultMCPSearchMemoryMaxLimit, "Hard ceiling on search_memory's limit param, regardless of what the MCP caller requests. See ADR-051")
@@ -161,6 +176,7 @@ func main() {
 	flag.StringVar(&registryPullSecret, "registry-pull-secret", "", "k8s dockerconfigjson Secret (in --namespace) with the registry credentials for pulling a mental_map cell's graphRef artifact; empty = the process's docker config (anonymous in a pod)")
 	flag.StringVar(&otelTokenSecret, "otel-token-secret", "", "k8s Secret name containing the bearer token for the OTLP endpoint (key: token)")
 	flag.StringVar(&otelProject, "otel-project", "", "openinference.project.name attribute sent with every span")
+	flag.StringVar(&otelServiceName, "otel-service-name", "xray", "service.name attribute sent with every span; give each instance its own to tell them apart")
 	flag.StringVar(&githubClientID, "github-client-id", "", "GitHub OAuth App client ID")
 	flag.StringVar(&githubClientSecret, "github-client-secret", "", "GitHub OAuth App client secret")
 	flag.StringVar(&githubOrg, "github-org", "", "Required GitHub org for access")
@@ -173,12 +189,16 @@ func main() {
 	flag.StringVar(&googleClientID, "google-client-id", "", "Google OAuth client ID")
 	flag.StringVar(&googleClientSecret, "google-client-secret", "", "Google OAuth client secret")
 	flag.StringVar(&googleDomain, "google-domain", "", "Required Google Workspace domain (the ID token's hd claim) for access")
+	flag.StringVar(&accessUsers, "access-users", "", "Comma-separated principals that may sign in, with any provider: google:<address> (in --google-domain), github:<numeric user id>, azure:<Entra object id>. With this or --access-admins set, only listed principals sign in; with neither, anyone the provider admits")
+	flag.StringVar(&accessAdmins, "access-admins", "", "Comma-separated principals, in the same forms as --access-users, granted the admin interface (MCP token, voice writes); they may also sign in")
 	flag.BoolVar(&webUI, "ui", true, "Serve the embedded web UI at / (when this binary was built with one)")
 	flag.BoolVar(&dev, "dev", false, "Dev mode: disable auth requirement and allow all CORS origins")
 	flag.BoolVar(&allowAnyUser, "allow-any-user", false, "Let any GitHub account (no --github-org), any Entra account (no --azure-tenant-id) or any Google account (no --google-domain) sign in. Without it the server refuses to start with a provider and no restriction")
 	flag.BoolVar(&mcpOAuth, "mcp-oauth", false, "Enable the co-located OAuth 2.1 authorization server for MCP (RFC 9728 discovery + /authorize + /token, mounted on the main server)")
 	flag.StringVar(&mcpResourceURL, "mcp-resource-url", "", "MCP resource URL advertised in OAuth metadata (default: <public-url>/mcp)")
 	flag.DurationVar(&mcpTokenTTL, "mcp-token-ttl", 15*time.Minute, "Lifetime of issued MCP access tokens")
+	flag.StringVar(&mcpStaticClientID, "mcp-static-client-id", "", "Client ID of a pre-registered public MCP client (e.g. a Claude.ai custom connector), with --mcp-oauth")
+	flag.StringVar(&mcpStaticClientRedirects, "mcp-static-client-redirect-uris", "", "Comma-separated redirect URIs of --mcp-static-client-id, matched exactly")
 	flag.DurationVar(&episodicTTL, "episodic-ttl", 7*24*time.Hour, "Max age of an episodic session memory before it is forgotten — dropped from get_recent_memory and deleted by the reaper (0 = never forget). See ADR-020")
 	flag.DurationVar(&retentionSweepInterval, "retention-sweep-interval", time.Hour, "How often the general retention sweep runs, hard-deleting memory items past their StaleAfter deadline (0 = disabled). Durable/config kinds (system_configuration, system_identity, policy, mental_map/map-carrying cells) and episodic memories (owned by --episodic-ttl instead) are exempt regardless of StaleAfter; an item with no StaleAfter set never expires.")
 	flag.IntVar(&trustedProxyHops, "trusted-proxy-hops", 0, "Number of trusted reverse proxies in front of the server (e.g. 1 for a single ingress/LB that appends the client IP). Controls how X-Forwarded-For is read for rate-limit keying: only this many entries from the right are trusted; 0 (default) ignores XFF and keys on the TCP peer address, which cannot be spoofed.")
@@ -204,6 +224,8 @@ func main() {
 	envDefault(&googleClientID, "GOOGLE_CLIENT_ID")
 	envDefault(&googleClientSecret, "GOOGLE_CLIENT_SECRET")
 	envDefault(&googleDomain, "GOOGLE_DOMAIN")
+	envDefault(&accessUsers, "ACCESS_USERS")
+	envDefault(&accessAdmins, "ACCESS_ADMINS")
 
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnixMs
 	log.Logger = log.Output(zerolog.ConsoleWriter{
@@ -221,6 +243,10 @@ func main() {
 		zerolog.SetGlobalLevel(zerolog.ErrorLevel)
 	default:
 		zerolog.SetGlobalLevel(zerolog.InfoLevel)
+	}
+
+	if err := xray.ValidateContextCompression(voiceContextTriggerTokens, voiceContextTargetTokens); err != nil {
+		log.Fatal().Err(err).Msg("invalid --voice-context-trigger-tokens / --voice-context-target-tokens")
 	}
 
 	logger := log.Logger
@@ -247,6 +273,9 @@ func main() {
 	if dev && (githubClientID != "" || azureClientID != "" || googleClientID != "") {
 		log.Fatal().Msg("--dev turns sign-in off and cannot be combined with --github-client-id, --azure-client-id or --google-client-id")
 	}
+	if err := checkStaticClientFlags(mcpOAuth, mcpStaticClientID, mcpStaticClientRedirects); err != nil {
+		log.Fatal().Err(err).Msg("invalid --mcp-static-client-id / --mcp-static-client-redirect-uris")
+	}
 	if dev && !isLoopbackAddr(httpAddr) {
 		log.Warn().Str("addr", httpAddr).Msg("--dev with sign-in off is listening beyond loopback: anyone who can reach it can read and write memory")
 	}
@@ -265,6 +294,17 @@ func main() {
 		}
 		log.Warn().Msg("azure OAuth without --azure-tenant-id: any Entra user can log in (--allow-any-user)")
 	}
+	accessGrants, err := xray.NewAccessGrants(accessUsers, accessAdmins, googleDomain)
+	if err != nil {
+		log.Fatal().Err(err).Msg("--access-users / --access-admins")
+	}
+	if err := accessGrants.RequireProviders(googleClientID != "", githubClientID != "", azureClientID != ""); err != nil {
+		log.Fatal().Err(err).Msg("--access-users / --access-admins")
+	}
+	if nu, na := accessGrants.Counts(); nu+na > 0 {
+		log.Info().Int("users", nu).Int("admins", na).Msg("access lists set")
+	}
+	xray.SetAccessGrants(accessGrants)
 	if googleClientID != "" && googleDomain == "" {
 		if !allowAnyUser {
 			log.Fatal().Msg("google sign-in needs --google-domain (any Google account would otherwise get a session); pass --allow-any-user to admit everyone")
@@ -273,7 +313,7 @@ func main() {
 	}
 
 	otelToken := &observability.BearerToken{}
-	if err := observability.ConfigureOTel(context.Background(), otelEndpoint, otelProject, otelToken, logger); err != nil {
+	if err := observability.ConfigureOTel(context.Background(), otelEndpoint, otelServiceName, otelProject, otelToken, logger); err != nil {
 		log.Warn().Err(err).Msg("otel tracing init failed — continuing without tracing")
 	}
 
@@ -285,6 +325,7 @@ func main() {
 			log.Warn().Err(err).Msg("embedding init failed — using keyword memory")
 			memory = xray.NewMemoryStore()
 		} else {
+			embedder.SetMaxInputTokens(embedMaxInputTokens)
 			log.Info().Str("endpoint", embedEndpoint).Str("project", gcpProject).Str("model", embedModel).Float64("score_gap", semanticScoreGap).Bool("lexical_shortcircuit", searchLexicalShortCircuit).Msg("HNSW semantic memory enabled")
 			memory = xray.NewMemoryStoreWithEmbedder(embedder, logger)
 			memory.SetSemanticScoreGap(float32(semanticScoreGap))
@@ -319,7 +360,7 @@ func main() {
 	if memMapsDir != "" {
 		if embedEndpoint == "" {
 			log.Error().Msg("--mental-maps-dir set but --embedding-endpoint is empty; code-graph tools disabled")
-		} else if deps := loadMemsnapGraph(memMapsDir, memMapsKeyFile, embedEndpoint, embedModel, embedDims, embedMaxInputChars, memMapsRouteFanout, memMapsTTLMin, logger); deps != nil {
+		} else if deps := loadMemsnapGraph(memMapsDir, memMapsKeyFile, embedEndpoint, embedModel, embedDims, embedMaxInputChars, embedMaxInputTokens, memMapsRouteFanout, memMapsTTLMin, logger); deps != nil {
 			memMapsDeps = deps
 		}
 	}
@@ -538,8 +579,8 @@ func main() {
 		PublicURL:         publicURL,
 		UICallbackOrigins: uiOrigins,
 	}
-	// In dev mode CORS allows all origins; in prod lock to the configured public URL.
-	allowedOrigin := publicURL
+	// In dev mode CORS allows all origins; in prod lock to the configured public URL's origin.
+	allowedOrigin := publicOrigin(publicURL)
 	if dev {
 		allowedOrigin = ""
 	}
@@ -550,6 +591,9 @@ func main() {
 	if webUI {
 		if assets, ok := webui.Assets(); ok {
 			uiFS = assets
+			if base := xray.BasePath(publicURL); !webui.BuiltFor(assets, base) {
+				logger.Warn().Str("base_path", base).Msg("the embedded UI was built for another base path, so its pages will not load: build it with make build BASE_PATH=<the --public-url path>")
+			}
 			logger.Info().Msg("web UI embedded: serving it at /")
 		} else {
 			logger.Info().Msg("this binary was built without the web UI (make ui); serving the API only")
@@ -562,14 +606,15 @@ func main() {
 			Domain:            googleDomain,
 			PublicURL:         publicURL,
 			UICallbackOrigins: uiOrigins,
-		}))
+		}),
+		xray.WithBasePath(xray.BasePath(publicURL)))
 
 	if gcpProject != "" || geminiAPIKey != "" {
 		voiceLoc := voiceLocation
 		if voiceLoc == "" {
 			voiceLoc = gcpLocation
 		}
-		vm = xray.NewVoiceManager(memory, configWatcher, secretStore, cellSyncer, namespace, gcpProject, voiceLoc, geminiAPIKey, voiceModel, voiceName, userDailyAudioTokenLimit, voiceMaxOutputTokens, headroomLimit, affectiveDialog, proactiveAudio, allowedOrigin, maxConcurrentVoice, logger)
+		vm = xray.NewVoiceManager(memory, configWatcher, secretStore, cellSyncer, namespace, gcpProject, voiceLoc, geminiAPIKey, voiceModel, voiceName, userDailyAudioTokenLimit, voiceMaxOutputTokens, headroomLimit, affectiveDialog, proactiveAudio, voiceSessionResumption, voiceContextTriggerTokens, voiceContextTargetTokens, allowedOrigin, maxConcurrentVoice, logger)
 		vm.SetMemMaps(memMapsDeps) // native code-graph voice tools (ADR-045); no-op when nil
 		srv.SetVoiceManager(vm)
 		log.Info().Msg("voice (Gemini Live) enabled at /v1/voice")
@@ -601,6 +646,12 @@ func main() {
 		// voice write-gate uses. Empty list ⇒ deny all (fail-closed); the static
 		// --mcp-token-secret bearer remains the out-of-band full-access admin path.
 		mcpAuth.SetAllowFn(func() []string { return configWatcher.Get().WriteAllowedUsers })
+		if mcpStaticClientID != "" || mcpStaticClientRedirects != "" {
+			if err := mcpAuth.SetStaticClient(mcpStaticClientID, splitAndTrim(mcpStaticClientRedirects)); err != nil {
+				log.Fatal().Err(err).Msg("--mcp-static-client-id / --mcp-static-client-redirect-uris")
+			}
+			logger.Info().Str("client_id", mcpStaticClientID).Msg("pre-registered MCP client")
+		}
 		mcpHandler := xray.NewMCPServer(memory, logger, func() string { return mcpTokenVal.Load().(string) }, mcpAuth, cellSyncer, namespace, memMapsDeps, mcpListMemoryMaxLimit, mcpSearchMemoryMaxLimit, mcpRecentMemoryMaxLimit)
 		srv.SetMCPAuth(mcpAuth, mcpHandler)
 		log.Info().Str("issuer", issuer).Str("resource", resourceURL).Bool("dev", dev).Msg("MCP OAuth enabled at /mcp (+ /.well-known, /authorize, /token)")
@@ -692,13 +743,14 @@ func registerCellIndexes(mgr ctrl.Manager) error {
 // returns graphmcp.Deps for the NATIVE voice tools (no MCP). Returns nil (and logs)
 // on any failure — the caller continues without code tools, so a snapshot problem
 // can never crash the server. Snapshots are rebuilt offline by the CGO build of this binary.
-func loadMemsnapGraph(dir, keyFile, embedEndpoint, embedModel string, embedDims, embedMaxInputChars, fanout, ttlMin int, logger zerolog.Logger) *graphmcp.Deps {
+func loadMemsnapGraph(dir, keyFile, embedEndpoint, embedModel string, embedDims, embedMaxInputChars, embedMaxInputTokens, fanout, ttlMin int, logger zerolog.Logger) *graphmcp.Deps {
 	emb, err := msindex.NewEmbedder(context.Background(), embedEndpoint, embedModel, embedDims, embedMaxInputChars, logger)
 	if err != nil {
 		log.Error().Err(err).Msg("code-graph embedder init failed; code tools disabled")
 		return nil
 	}
-	fp := msengine.EmbedFingerprint{Model: embedModel, Dims: embedDims, MaxInputChars: embedMaxInputChars}
+	emb.SetMaxInputTokens(embedMaxInputTokens)
+	fp := msengine.EmbedFingerprint{Model: embedModel, Dims: embedDims, MaxInputChars: embedMaxInputChars, MaxInputTokens: embedMaxInputTokens}
 	reg := msengine.NewRegistry(emb, fp, fanout, time.Duration(ttlMin)*time.Minute, false, logger)
 	if keyFile == "" {
 		keyFile = os.Getenv("XRAY_SNAPSHOT_KEY")
@@ -819,4 +871,23 @@ func isLoopbackAddr(addr string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+// checkStaticClientFlags refuses the pre-registered client flags without
+// --mcp-oauth, where they would otherwise be ignored without a word.
+func checkStaticClientFlags(mcpOAuth bool, clientID, redirectURIs string) error {
+	if !mcpOAuth && (clientID != "" || redirectURIs != "") {
+		return errors.New("--mcp-static-client-id and --mcp-static-client-redirect-uris take effect only with --mcp-oauth")
+	}
+	return nil
+}
+
+// publicOrigin is the scheme and host of the public URL, which is all a browser
+// sends as Origin; the path the server is mounted under is not part of it.
+func publicOrigin(publicURL string) string {
+	u, err := url.Parse(publicURL)
+	if err != nil || u.Host == "" {
+		return publicURL
+	}
+	return u.Scheme + "://" + u.Host
 }

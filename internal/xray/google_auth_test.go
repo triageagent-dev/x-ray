@@ -57,7 +57,7 @@ func TestGoogleIdentity_AcceptsWorkspaceAccount(t *testing.T) {
 	g := newTestGoogleAuth("")
 	login, sub, err := g.identity(googleTestToken(t, workspaceClaims()), time.Now())
 	require.NoError(t, err)
-	assert.Equal(t, "alice", login)
+	assert.Equal(t, "alice@example.com", login)
 	assert.Equal(t, "1234567890", sub)
 }
 
@@ -113,7 +113,24 @@ func TestGoogleIdentity_AnyDomainOnlyWhenUnset(t *testing.T) {
 	c["email"] = "someone@gmail.com"
 	login, _, err := g.identity(googleTestToken(t, c), time.Now())
 	require.NoError(t, err)
-	assert.Equal(t, "someone", login)
+	assert.Equal(t, "someone@gmail.com", login)
+}
+
+func TestGoogleCallback_SignsInNonASCIIAddressWithNoLists(t *testing.T) {
+	c := workspaceClaims()
+	c["email"] = "jos\u00e9@example.com"
+	w := googleCallback(t, googleTestToken(t, c))
+	require.Equal(t, http.StatusFound, w.Code)
+	require.NotNil(t, sessionCookie(w))
+}
+
+func TestGoogleCallback_NonASCIIAddressIsRefusedByAList(t *testing.T) {
+	withGrants(t, "google:k@example.com", "")
+	c := workspaceClaims()
+	c["email"] = "\u212A@example.com" // the Kelvin sign lower-cases to "k"
+	w := googleCallback(t, googleTestToken(t, c))
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Nil(t, sessionCookie(w))
 }
 
 func TestGoogleLogin_RedirectsWithStateAndDomainHint(t *testing.T) {
@@ -189,7 +206,7 @@ func TestGoogleCallback_SignsInWorkspaceUser(t *testing.T) {
 	require.NotNil(t, c)
 	username, userID, ok := sessions.validate(c.Value)
 	require.True(t, ok)
-	assert.Equal(t, "alice", username)
+	assert.Equal(t, "alice@example.com", username)
 	assert.Equal(t, "google:1234567890", userID)
 }
 
