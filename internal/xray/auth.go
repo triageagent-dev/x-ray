@@ -566,17 +566,17 @@ func wsBearerToken(r *http.Request) string {
 // and the voice upgrade — can never disagree about who the caller is.
 func sessionFromRequest(r *http.Request) (username, userID string, ok bool) {
 	if c, err := r.Cookie("xray_session"); err == nil {
-		if u, id, valid := sessions.validate(c.Value); valid {
+		if u, id, valid := sessions.validate(c.Value); valid && grants.allowsUser(id, u) {
 			return u, id, true
 		}
 	}
 	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-		if u, id, valid := sessions.validate(auth[7:]); valid {
+		if u, id, valid := sessions.validate(auth[7:]); valid && grants.allowsUser(id, u) {
 			return u, id, true
 		}
 	}
 	if tok := wsBearerToken(r); tok != "" {
-		if u, id, valid := sessions.validate(tok); valid {
+		if u, id, valid := sessions.validate(tok); valid && grants.allowsUser(id, u) {
 			return u, id, true
 		}
 	}

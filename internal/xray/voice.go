@@ -419,7 +419,7 @@ func (m *VoiceManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// talking to. Sanitize first (AUDIT F-8): the display name is provider-sourced,
 	// so strip newlines/control chars and cap length to prevent prompt-injection
 	// that overrides the system instruction.
-	if clean := sanitizePromptField(ghUser); clean != "" {
+	if clean := sanitizePromptField(promptName(rawUserID, ghUser)); clean != "" {
 		systemPrompt += "\n\nYou are speaking with " + clean + "."
 	}
 
@@ -439,8 +439,8 @@ func (m *VoiceManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		who := "The user"
-		if ghUser != "" {
-			who = ghUser
+		if name := promptName(rawUserID, ghUser); name != "" {
+			who = name
 		}
 		systemPrompt += "\n\n" + who + " is currently focusing on specific items pinned in their X-Ray view. Call get_pinned_items to retrieve exactly those items when they ask about what they are looking at, their pinned items, or related topics."
 	}
@@ -499,6 +499,7 @@ func (m *VoiceManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if userHash != "" {
 		logCtx = logCtx.Str("user", userHash)
 	}
+	writeAllowed = voiceWriters(writeAllowed, rawUserID, ghUser, userHash)
 	log := logCtx.Logger()
 	remote := r.Header.Get("X-Forwarded-For")
 	if remote == "" {
@@ -514,7 +515,7 @@ func (m *VoiceManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Info().Str("remote", remote).Str("voice", voice).Strs("tools", toolNames).Int("prompt_len", len(systemPrompt)).Msg("voice session started")
 
-	session, err := newVoiceSession(r.Context(), id, ghUser, userHash, writeAllowed, conn, m.memory, m.syncer, genaiClient, liveModel, voice, systemPrompt, greeting, enabledTools, m.config.Get().Categories, pinnedIDs, mcpServers, m.secrets, m.namespace, headroomLimit, m.maxOutputTokens, affectiveDialog, proactiveAudio, m.effectiveSessionResumption(), m.contextCompression(log), m.memMapsDeps, log)
+	session, err := newVoiceSession(r.Context(), id, promptName(rawUserID, ghUser), userHash, writeAllowed, conn, m.memory, m.syncer, genaiClient, liveModel, voice, systemPrompt, greeting, enabledTools, m.config.Get().Categories, pinnedIDs, mcpServers, m.secrets, m.namespace, headroomLimit, m.maxOutputTokens, affectiveDialog, proactiveAudio, m.effectiveSessionResumption(), m.contextCompression(log), m.memMapsDeps, log)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to create voice session")
 		conn.WriteJSON(VoiceServerMessage{Error: fmt.Sprintf("failed to connect to voice model: %v", err)}) //nolint:errcheck

@@ -120,6 +120,8 @@ func main() {
 		googleClientID            string
 		googleClientSecret        string
 		googleDomain              string
+		accessUsers               string
+		accessAdmins              string
 		dev                       bool
 		allowAnyUser              bool
 		mcpOAuth                  bool
@@ -187,6 +189,8 @@ func main() {
 	flag.StringVar(&googleClientID, "google-client-id", "", "Google OAuth client ID")
 	flag.StringVar(&googleClientSecret, "google-client-secret", "", "Google OAuth client secret")
 	flag.StringVar(&googleDomain, "google-domain", "", "Required Google Workspace domain (the ID token's hd claim) for access")
+	flag.StringVar(&accessUsers, "access-users", "", "Comma-separated principals that may sign in, with any provider: google:<address> (in --google-domain), github:<numeric user id>, azure:<Entra object id>. With this or --access-admins set, only listed principals sign in; with neither, anyone the provider admits")
+	flag.StringVar(&accessAdmins, "access-admins", "", "Comma-separated principals, in the same forms as --access-users, granted the admin interface (MCP token, voice writes); they may also sign in")
 	flag.BoolVar(&webUI, "ui", true, "Serve the embedded web UI at / (when this binary was built with one)")
 	flag.BoolVar(&dev, "dev", false, "Dev mode: disable auth requirement and allow all CORS origins")
 	flag.BoolVar(&allowAnyUser, "allow-any-user", false, "Let any GitHub account (no --github-org), any Entra account (no --azure-tenant-id) or any Google account (no --google-domain) sign in. Without it the server refuses to start with a provider and no restriction")
@@ -220,6 +224,8 @@ func main() {
 	envDefault(&googleClientID, "GOOGLE_CLIENT_ID")
 	envDefault(&googleClientSecret, "GOOGLE_CLIENT_SECRET")
 	envDefault(&googleDomain, "GOOGLE_DOMAIN")
+	envDefault(&accessUsers, "ACCESS_USERS")
+	envDefault(&accessAdmins, "ACCESS_ADMINS")
 
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnixMs
 	log.Logger = log.Output(zerolog.ConsoleWriter{
@@ -288,6 +294,17 @@ func main() {
 		}
 		log.Warn().Msg("azure OAuth without --azure-tenant-id: any Entra user can log in (--allow-any-user)")
 	}
+	accessGrants, err := xray.NewAccessGrants(accessUsers, accessAdmins, googleDomain)
+	if err != nil {
+		log.Fatal().Err(err).Msg("--access-users / --access-admins")
+	}
+	if err := accessGrants.RequireProviders(googleClientID != "", githubClientID != "", azureClientID != ""); err != nil {
+		log.Fatal().Err(err).Msg("--access-users / --access-admins")
+	}
+	if nu, na := accessGrants.Counts(); nu+na > 0 {
+		log.Info().Int("users", nu).Int("admins", na).Msg("access lists set")
+	}
+	xray.SetAccessGrants(accessGrants)
 	if googleClientID != "" && googleDomain == "" {
 		if !allowAnyUser {
 			log.Fatal().Msg("google sign-in needs --google-domain (any Google account would otherwise get a session); pass --allow-any-user to admit everyone")
