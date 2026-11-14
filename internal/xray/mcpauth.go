@@ -844,9 +844,9 @@ func (a *mcpAuthorizer) grantedScopes(userHash string, byGrant bool) []string {
 }
 
 // SetStaticClient pre-registers a public client with fixed redirect URIs, for an
-// MCP client that is given a client ID instead of registering itself (Claude.ai's
-// custom connector posts the code to its own https callback, which open DCR
-// refuses). The redirect URI must match exactly. Call before serving.
+// MCP client that is given a client ID instead of registering itself (it posts
+// the code to its own https callback, which open DCR refuses). The redirect URI
+// must match exactly. Call before serving.
 func (a *mcpAuthorizer) SetStaticClient(clientID string, redirectURIs []string) error {
 	if len(clientID) < 8 {
 		return fmt.Errorf("static MCP client ID %q: at least 8 characters", clientID)

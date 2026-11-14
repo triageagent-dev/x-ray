@@ -34,10 +34,10 @@ func TestCheckStaticClientFlags(t *testing.T) {
 	}{
 		{"neither flag, oauth off", false, "", "", false},
 		{"neither flag, oauth on", true, "", "", false},
-		{"both flags, oauth on", true, "connector-1", "https://claude.example/cb", false},
+		{"both flags, oauth on", true, "connector-1", "https://connector.example/cb", false},
 		{"id only, oauth off", false, "connector-1", "", true},
-		{"redirects only, oauth off", false, "", "https://claude.example/cb", true},
-		{"both flags, oauth off", false, "connector-1", "https://claude.example/cb", true},
+		{"redirects only, oauth off", false, "", "https://connector.example/cb", true},
+		{"both flags, oauth off", false, "connector-1", "https://connector.example/cb", true},
 	}
 	for _, c := range cases {
 		err := checkStaticClientFlags(c.oauth, c.id, c.uris)
