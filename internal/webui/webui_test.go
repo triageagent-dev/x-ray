@@ -98,3 +98,16 @@ func TestAssets_FalseWhenNothingWasBuilt(t *testing.T) {
 	_, ok := Assets()
 	_ = ok // either is valid here; the contract is that it never panics or errors
 }
+
+func TestBuiltFor(t *testing.T) {
+	root := export()
+	assert.True(t, BuiltFor(root, ""))
+	assert.False(t, BuiltFor(root, "/path"), "a root export under /path asks the host root for its assets")
+
+	sub := fstest.MapFS{"index.html": {Data: []byte(`<script src="/path/_next/static/a.js"></script>`)}}
+	assert.True(t, BuiltFor(sub, "/path"))
+	assert.False(t, BuiltFor(sub, ""), "a /path export at the root asks /path for its assets")
+	assert.False(t, BuiltFor(sub, "/pat"))
+
+	assert.True(t, BuiltFor(fstest.MapFS{}, "/path"), "no index.html: nothing to check")
+}

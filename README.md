@@ -32,11 +32,11 @@ Both are searched by keyword and by meaning, and a web UI that is part of the bi
 
 <p align="center"><img src="docs/img/recall.svg" alt="The memory map, lit by recalls: cells glow and fade back, a blue fibre lights the recalled region, the recalled cells fire with spike rings, and a pulse of light runs along their links." width="880"></p>
 
-Every recall is an event. When an agent recalls memory, through `search_memory` or `get_memory_context` over MCP, or by voice, the store publishes a **hit** event: the ids of the items it returned, the query, and the kind of each item. A write publishes a **change** event. Both reach every connected client over a live stream. This server streams them as server-sent events at `/v1/memory/events`, and the web UI in the binary listens to that stream. A deployment that carries the same events over a WebSocket, as a Triage controller does, drives the same UI. Private items are never named on the stream.
+Every recall is an event. When an agent recalls memory, through `search_memory` or `get_memory_context` over MCP, or by voice, the store publishes a **hit** event: the ids of the items it returned, the query, the kind of each item and the tags of each shared item. A write publishes a **change** event. Both reach every connected client over a live stream. This server streams them as server-sent events at `/v1/memory/events`, and the web UI in the binary listens to that stream. A deployment that carries the same events over a WebSocket, as a Triage controller does, drives the same UI. Private items are never named on the stream.
 
 The web UI turns a hit into light, the way optogenetics does: a neuron made to carry a light-gated channel fires when blue light reaches it. In the graph:
 
-1. **The region.** The kinds in the event name the region, so a blue fibre lights it even when the recalled cell is not one of the nodes drawn.
+1. **The region.** The kinds in the event, and the tags for a kind split by tag, name the region, so a blue fibre lights it even when the recalled cell is not one of the nodes drawn.
 2. **The cells in it** wash blue in the order the light reaches them, nearest the fibre first.
 3. **The recalled cells** fire hardest: a white-blue double flare, three spike rings, and an afterglow that lasts a few seconds.
 4. **The synapses.** A pulse of light runs from each recalled cell along its links to the memories it connects to.
@@ -107,6 +107,10 @@ helm upgrade --install xray oci://ghcr.io/triageagent-dev/charts/xray \
 ```
 
 To give each MCP client a token of its own, which also makes its writes count as `human`, set `mcp.oauth.enabled: true`, uncomment the `--mcp-oauth` lines in `args` and remove `--mcp-address=:8083`. The shared secret still works as a fallback.
+
+Clients that register themselves (Claude Code) need nothing more: open registration accepts loopback and custom-scheme redirect URIs. A client that is given a client ID and posts the code to its own https callback, such as a Claude.ai custom connector, is pre-registered with `--mcp-static-client-id=<id>` and `--mcp-static-client-redirect-uris=<uri>[,<uri>]`; the redirect URI must match exactly. Enter that ID, with no secret, in the connector form.
+
+With any sign-in provider, `--access-users=<principal>[,…]` and `--access-admins=<principal>[,…]` (or `ACCESS_USERS`, `ACCESS_ADMINS`) name who may sign in and who also gets the admin interface (an MCP token, voice writes), without editing `writeAllowedUsers`. A principal is `google:<address>` (in `--google-domain`), `github:<numeric user id>` or `azure:<Entra object id>`; ids rather than logins, because a login can be renamed and re-registered. Once either list is set, only listed principals sign in, whichever provider they use, and the server refuses to start with a principal for a provider that has no client id.
 
 **Replicas.** The chart runs one. Items and their change events follow the cluster across replicas, but voice quota counters and search-hit pulses are per pod, so keep `replicaCount: 1`.
 

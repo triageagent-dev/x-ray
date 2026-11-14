@@ -43,8 +43,13 @@ what lets a paraphrase reach the right function.
 The vector is cached by that **text**, not by node identity, because every
 rebuild constructs fresh `*Node` objects. Misses go out in one `EmbedBatch`
 against any llama.cpp-compatible `/v1/embeddings`, nomic at 256 dimensions
-(Matryoshka truncation), with an 8192-character input cap so oversized nodes
-truncate rather than fail.
+(Matryoshka truncation), with an 8192-byte input cap. Bytes are not tokens, so
+a dense node under the cap can still exceed the model's window, and llama.cpp
+refuses such an input rather than truncating it; `-embedding-max-input-tokens`
+(the window, 512 for nomic-embed-text-v2-moe) cuts it to the longest prefix
+that fits, counted by the endpoint's `POST /tokenize`. An endpoint that cannot
+count gets the byte-capped text with a warning; a 404 or 405 from `/tokenize`
+turns counting off for the life of the process.
 
 ## Snapshot
 
@@ -61,7 +66,9 @@ That is how a server registers dozens of maps without decoding a single graph.
   per-node attributes that X-Ray round-trips and never reads).
 
 A `Dims` mismatch in the fingerprint is a hard rejection, because those vectors
-are not comparable to a query embedding. A model *name* difference only warns:
+are not comparable to a query embedding, and so is a mismatch of either input
+cap (`MaxInputChars`, `MaxInputTokens`): a map built before the token window
+existed carries 0 and is rebuilt. A model *name* difference only warns:
 a llama.cpp sidecar serves whatever GGUF is loaded regardless of its label.
 
 `Body.HNSW` is additive. When absent the loader rebuilds the ANN; when present

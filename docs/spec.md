@@ -134,7 +134,7 @@ A map is a pre-built graph saved as `<name>.graph.gob.gz` with its HNSW index. L
 - **Carried in a cell.** A cell holds the gob in `data.graph`. The cell syncer decodes it and registers the map, and skips the work when the bytes are unchanged.
 - **Pulled from a registry.** A cell holds a digest-pinned OCI reference in `data.graphRef` (plain text, `name@sha256:...`), for a map too large for a cell (about 480 nodes). The server pulls the image, takes its one `*.graph.gob.gz` file and registers the map, once per reference, and retries every 30 seconds while the registry is unreachable. A tag is refused. `--registry-pull-secret` names a `dockerconfigjson` Secret for a private registry. The same key the Triage core reads.
 
-Snapshots must match the server's embedding fingerprint: the model, `--embedding-dims` and `--embedding-max-input-chars`.
+Snapshots must match the server's embedding fingerprint: the model, `--embedding-dims`, `--embedding-max-input-chars` and `--embedding-max-input-tokens`.
 
 ## Recall
 
@@ -148,7 +148,7 @@ The score is a bonus for the whole query in the title, a graded match per token 
 
 ### Semantic rank
 
-The query is embedded and compared to the HNSW index by cosine similarity. The default model is `gemini-embedding-001` at 128 dimensions, from Vertex AI (`--gcp-project`) or any OpenAI-compatible endpoint (`--embedding-endpoint`). Input is cut to 8000 characters unless `--embedding-max-input-chars` says otherwise. `--semantic-score-gap` drops results more than a given cosine gap below the top hit.
+The query is embedded and compared to the HNSW index by cosine similarity. The default model is `gemini-embedding-001` at 128 dimensions, from Vertex AI (`--gcp-project`) or any OpenAI-compatible endpoint (`--embedding-endpoint`). Input is cut to 8000 bytes unless `--embedding-max-input-chars` says otherwise. That is a bound, not a fit: bytes per token vary with the text, and a dense input under it can still exceed the model's window. `--embedding-max-input-tokens` is the window (0, the default, means unknown; nomic-embed-text-v2-moe reads 512): an input over it is cut, when it is sent, to the longest prefix that fits, counted by the endpoint's own tokenizer (llama.cpp `POST /tokenize`), because llama.cpp refuses an over-window input instead of truncating it. Text with fewer bytes than the window is never counted. When the endpoint cannot count (an OpenAI-compatible gateway with no `/tokenize`, or a failing tokenizer), the byte-capped text is sent with a warning and the server's answer decides; a 404 or 405 from `/tokenize` turns counting off for the life of the process. Vertex AI truncates on its side and ignores the flag. `--semantic-score-gap` drops results more than a given cosine gap below the top hit.
 
 A cell is embedded as its kind, scope, subject, title and content joined by spaces, cut to 1800 bytes on a character boundary (the batch limit of a local embedder is 2048 tokens, and a longer input is rejected outright). The store knows its embedding dimension and refuses a vector or a query of another length. If a search's whole top window is rejected on lookup, because every hit is a cell deleted or retired on another replica and still indexed here, the search ranks every cell exactly instead, so the cells that qualify are not starved. The embedding and index phases of each semantic search are reported separately as `xray.memory.search.phase.duration`.
 
@@ -265,11 +265,11 @@ The memory routes are read-only. Writes arrive by MCP, by voice, or as objects a
 
 ### Live events
 
-`GET /v1/memory/events` carries two event types: a *hit* (the item ids, query and kinds of a recall that just ran) and a *change* (an upsert or delete). A recall publishes a hit when it is made by `search_memory` or `get_memory_context` over MCP, or by the voice search and list tools. Private items are never named: a hit lists the shared items a search returned, and a private change goes only to its owner. A client connected to one replica sees the events of that replica ([Replicas](#replicas)).
+`GET /v1/memory/events` carries two event types: a *hit* (the item ids, query, kinds and, for shared items, tags of a recall that just ran) and a *change* (an upsert or delete). A recall publishes a hit when it is made by `search_memory` or `get_memory_context` over MCP, or by the voice search and list tools. Private items are never named: a hit lists the shared items a search returned, and a private change goes only to its owner. A client connected to one replica sees the events of that replica ([Replicas](#replicas)).
 
 ### How a recall shows up
 
-The web UI turns a hit into light, the way optogenetics does: a neuron made to carry a light-gated channel fires when blue light reaches it. The kinds in the event name the region, so a blue fibre lights it even when the recalled cell is not one of the nodes drawn. The cells in the region wash blue in the order the light reaches them, nearest the fibre first. The recalled cells fire hardest, with a double flare, three spike rings and an afterglow of a few seconds. A pulse of light then runs from each recalled cell along its links to the memories it connects to. It is laid over the category-coloured flash the graph already draws, and a repeat hit fires again. The region treatment is one fast attack and a smooth decay, about two pulses a second at most, because flicker over a large area is a photosensitivity risk; reduced motion gets one slow wash. The embedded web UI listens to this stream; a Triage deployment carries the same events over a WebSocket.
+The web UI turns a hit into light, the way optogenetics does: a neuron made to carry a light-gated channel fires when blue light reaches it. The kinds in the event, and the tags for a kind split by tag (ADR-035), name the region, so a blue fibre lights it even when the recalled cell is not one of the nodes drawn. The cells in the region wash blue in the order the light reaches them, nearest the fibre first. The recalled cells fire hardest, with a double flare, three spike rings and an afterglow of a few seconds. A pulse of light then runs from each recalled cell along its links to the memories it connects to. It is laid over the category-coloured flash the graph already draws, and a repeat hit fires again. The region treatment is one fast attack and a smooth decay, about two pulses a second at most, because flicker over a large area is a photosensitivity risk; reduced motion gets one slow wash. The embedded web UI listens to this stream; a Triage deployment carries the same events over a WebSocket.
 
 ## Access
 
@@ -280,13 +280,14 @@ Every route under `/v1` needs a session except the sign-in routes, `/v1/version`
 | GitHub sign-in | `--github-client-id`, `--github-client-secret`; `--github-org` restricts access to an organisation and `--github-team` to a team |
 | Microsoft Entra sign-in | `--azure-client-id`, `--azure-client-secret`, `--azure-tenant-id` |
 | Google sign-in | `--google-client-id`, `--google-client-secret`, `--google-domain` (Workspace domain, matched on the ID token `hd` claim) |
+| Access by principal | `--access-users` and `--access-admins` (or `ACCESS_USERS`, `ACCESS_ADMINS`) take `google:<address>`, `github:<numeric user id>` or `azure:<object id>`. With either list set, only listed principals sign in, checked at sign-in, on every session use and at `/authorize`; an admin also gets the write scope. An invalid list stops the server at start (ADR-066) |
 | Session | A 24-hour `xray_session` cookie. The same token is accepted as `Authorization: Bearer`, and on a WebSocket upgrade as a subprotocol, because a browser cannot set headers on that handshake |
 | Session to another origin | A login may hand its token to a UI on a different host through `?ui=<origin>`, only for origins in `--ui-callback-origins`. Empty by default |
 | MCP, shared secret | A Secret named by `--mcp-token-secret`, key `token`. Full scope |
-| MCP, OAuth 2.1 | `--mcp-oauth`. The server is its own authorization server: discovery under `/.well-known`, `/register`, `/authorize`, `/token`, with PKCE. Tokens are audience-bound JWTs with the read and write scopes; `--mcp-token-ttl` sets their lifetime. The user must be signed in to the web app first |
-| Write access | `writeAllowedUsers` in the configuration cell limits who may hold the write scope |
+| MCP, OAuth 2.1 | `--mcp-oauth`. The server is its own authorization server: discovery under `/.well-known`, `/register`, `/authorize`, `/token`, with PKCE. Tokens are audience-bound JWTs with the read and write scopes; `--mcp-token-ttl` sets their lifetime. The user must be signed in to the web app first. `--mcp-static-client-id` and `--mcp-static-client-redirect-uris` pre-register one public client, such as a Claude.ai custom connector, which must use one of those redirect URIs exactly (https, or http on loopback) and which the user approves on a consent page; open registration takes loopback and custom-scheme redirect URIs only. `/token` rejects a `client_id` or `redirect_uri` that is sent and does not match the code (ADR-065) |
+| Write access | `writeAllowedUsers` in the configuration cell and `--access-admins` name who may hold the write scope |
 
-`--public-url` is the externally reachable base URL. It scopes CORS, the OAuth callbacks and the origin check on the voice WebSocket. `--trusted-proxy-hops` says how many proxies in front of the server append the client address, which decides how `X-Forwarded-For` is read for rate limiting. `--max-request-bytes` caps request bodies.
+`--public-url` is the externally reachable base URL. It scopes CORS, the OAuth callbacks and the origin check on the voice WebSocket. The origin check compares the scheme and host only. A path in it (`https://gw.example.com/path`) mounts the server under that path on a shared host: redirects, the session and state cookies, the PWA manifest and the service worker stay under it, and the OAuth metadata is also served at the host root with the path inserted (RFC 8414, RFC 9728). The proxy forwards the path unchanged, and the UI in the image must be built for it (`make build BASE_PATH=/path`; ADR-064). `--trusted-proxy-hops` says how many proxies in front of the server append the client address, which decides how `X-Forwarded-For` is read for rate limiting. `--max-request-bytes` caps request bodies.
 
 ## Voice
 
@@ -303,8 +304,18 @@ Each session reads the `system_configuration` cell at its start, so edits apply 
 | maxUserDailyAudioTokens | Per-user audio token cap per UTC day; overrides the flag when non-zero |
 | maxItemContentChars | Bound on each memory item's content in tool results |
 | affectiveDialog, proactiveAudio | Gemini Live options, native-audio models only |
+| sessionResumption | Resume the upstream session on a GoAway or a dropped connection; overrides `--voice-session-resumption` when set |
+| contextTriggerTokens, contextTargetTokens | Turn on context window compression: the trigger (5000-128000) and, below it, the size the window is cut to; they override `--voice-context-trigger-tokens` and `--voice-context-target-tokens` when the trigger is set |
 
 The voice tools are `search_memory`, `list_memory`, `get_memory`, `fetch_memory`, `recent_memory`, `upsert_memory`, `save_memory`, `delete_memory` and `end_session`. Voice writes are private to the user. In voice, `get_memory` also returns the graph's regions with their item counts and, for items tagged `doc:<id>`, documents, sections and up to 50 titles (ADR-035). When a map is loaded the graph tools are available to the model too.
+
+### Session longevity
+
+Gemini Live recycles its connection about every 10 minutes and sends a GoAway 30–60 s before. The server logs each GoAway with the time left and records it on the session span. With `--voice-session-resumption` (off by default) the session asks for resumption handles and keeps the latest resumable one. After a GoAway it reconnects at once when nobody is speaking, or, while the user is speaking or the model is answering or running a tool, once that turn has ended and the handle that follows it has arrived; on a dropped connection it reconnects instead of ending. The browser WebSocket stays open and the server restores the conversation from the handle. On Vertex the session also asks for the index of the last client message each handle covers, keeps the messages sent since (at most 2048 messages or 320,000 bytes, about 10 s of microphone audio; past that the oldest microphone frames are dropped; other messages stay, up to 256 of them or 1 MiB), and sends them again on the new connection before anything new: from the first microphone frame with speech, at the pace it was spoken. No microphone audio goes to Gemini faster than real time (silent frames that fall behind are dropped), since Vertex ends a resumed stream that gets audio faster than real time with 429. Each drop gets one attempt: a rejected handle, or a resumed session that drops before it delivers anything, ends the session. Each reconnect is logged with its cause.
+
+Resumption keeps a session alive across connections; it does not bound the session's context. Without compression, Gemini Live limits audio-only sessions to 15 minutes. `--voice-context-trigger-tokens` (0, the default, is off) turns on a sliding window: once the context passes the trigger, the server drops the oldest turns, never the system instruction, and `--voice-context-target-tokens` (0 leaves it to the server, half the trigger) is the size it is cut to. The trigger must be between 5000 and 128000 and the target below it; the server refuses to start otherwise. A trigger in the configuration cell wins over the flags, and its target goes with it; a pair that fails the check is logged and the flags apply. A resumed connection is opened with the same compression.
+
+When a session ends for any reason, the browser gets `done` and then a WebSocket close frame, 1000 for a normal end and 1011 when the voice model connection failed.
 
 ### Limits
 
@@ -318,7 +329,7 @@ Voice needs Gemini credentials: `--gcp-project` for Vertex AI, or `--gemini-api-
 
 The web UI is part of the binary. It is a client of the API above, built as a static export and embedded, and the server serves it at `/` on the same origin as the API. API paths, `/healthz`, the PWA files, `/mcp` and the OAuth endpoints go to the server; everything else is the UI. It runs the same locally and in a cluster: `make run` opens it on port 8080 with sign-in off, and the chart serves it through the same Service. `--ui=false` serves the API alone, and a binary built with `UI=0` has no UI at all.
 
-One origin is required. The voice WebSocket URL is built in the browser from its own host, the session cookie has no `Domain`, and the server checks the WebSocket's `Origin` against `--public-url`. Embedding gives it, so `--public-url` is simply the address users reach, and it is also the OAuth callback base.
+One origin is required. The voice WebSocket URL is built in the browser from its own host, the session cookie has no `Domain`, and the server checks the WebSocket's `Origin` against the scheme and host of `--public-url`. Embedding gives it, so `--public-url` is simply the address users reach, and it is also the OAuth callback base.
 
 Each document is served with a `script-src` that names the hashes of its own inline scripts, so no script runs without one; `'unsafe-inline'` is allowed for styles only. Hashed bundles are cached for a year, and HTML is revalidated so an upgrade is seen at once.
 
@@ -489,15 +500,15 @@ Flags set the baseline. The configuration cell and the chart's `values.yaml` ove
 | Group | Flags |
 |---|---|
 | Listeners | `--http-address` :8080, `--mcp-address` :8083, `--metrics-address` :9090, `--namespace` xray, `--log-level` info |
-| Embeddings | `--embedding-endpoint`, `--embedding-model` gemini-embedding-001, `--embedding-dims` 128, `--embedding-max-input-chars`, `--gcp-project`, `--gcp-location` europe-west4, `--semantic-score-gap` |
+| Embeddings | `--embedding-endpoint`, `--embedding-model` gemini-embedding-001, `--embedding-dims` 128, `--embedding-max-input-chars`, `--embedding-max-input-tokens` 0, `--gcp-project`, `--gcp-location` europe-west4, `--semantic-score-gap` |
 | Search | `--search-lexical-shortcircuit`, `--search-recall-shaping` true, `--memory-write-dedup` true, `--headroom-content-limit`, `--mcp-search-memory-max-limit`, `--mcp-list-memory-max-limit`, `--mcp-recent-memory-max-limit` |
 | Maps | `--mental-maps-dir`, `--mental-maps-snapshot-key`, `--registry-pull-secret`, `--mental-maps-route-fanout` 1, `--mental-maps-ttl-min` 0 |
-| Graph server | `xray graph serve-snapshots`: `-snapshot-dir`, `-addr` 127.0.0.1:8085, `-writable`, `-memory-map` session, `-memory-ttl` 7d, `-skills-map` skills, `-graph-ttl-min` 0, `-route-fanout` 1, `-embedding-endpoint` http://localhost:8090, `-embedding-model` nomic, `-embedding-dims` 256, `-embedding-max-input-chars` 8192, `-snapshot-key`, `-auth-token-file`, `-allowed-hosts`, `-allowed-origins`. `serve` takes `-repo` and listens on 127.0.0.1:8084 |
-| Voice | `--gemini-api-key`, `--voice-model`, `--voice-location`, `--voice-name`, `--user-daily-audio-token-limit`, `--max-concurrent-voice`, `--voice-max-output-tokens`, `--voice-affective-dialog`, `--voice-proactive-audio` |
-| Sign-in and MCP | `--public-url`, `--github-client-id`, `--github-client-secret`, `--github-org`, `--github-team`, `--azure-client-id`, `--azure-client-secret`, `--azure-tenant-id`, `--google-client-id`, `--google-client-secret`, `--google-domain`, `--ui-callback-origins`, `--mcp-token-secret`, `--mcp-oauth`, `--mcp-resource-url`, `--mcp-token-ttl` 15m, `--dev` |
+| Graph server | `xray graph serve-snapshots`: `-snapshot-dir`, `-addr` 127.0.0.1:8085, `-writable`, `-memory-map` session, `-memory-ttl` 7d, `-skills-map` skills, `-graph-ttl-min` 0, `-route-fanout` 1, `-embedding-endpoint` http://localhost:8090, `-embedding-model` nomic, `-embedding-dims` 256, `-embedding-max-input-chars` 8192, `-embedding-max-input-tokens` 0, `-snapshot-key`, `-auth-token-file`, `-allowed-hosts`, `-allowed-origins`. `serve` takes `-repo` and listens on 127.0.0.1:8084 |
+| Voice | `--gemini-api-key`, `--voice-model`, `--voice-location`, `--voice-name`, `--user-daily-audio-token-limit`, `--max-concurrent-voice`, `--voice-max-output-tokens`, `--voice-affective-dialog`, `--voice-proactive-audio`, `--voice-session-resumption`, `--voice-context-trigger-tokens`, `--voice-context-target-tokens` |
+| Sign-in and MCP | `--public-url`, `--github-client-id`, `--github-client-secret`, `--github-org`, `--github-team`, `--azure-client-id`, `--azure-client-secret`, `--azure-tenant-id`, `--google-client-id`, `--google-client-secret`, `--google-domain`, `--access-users`, `--access-admins`, `--ui-callback-origins`, `--mcp-token-secret`, `--mcp-oauth`, `--mcp-resource-url`, `--mcp-token-ttl` 15m, `--mcp-static-client-id`, `--mcp-static-client-redirect-uris`, `--dev` |
 | Retention | `--episodic-ttl` 168h, `--retention-sweep-interval` 1h |
 | Requests | `--max-request-bytes` 1 MiB, `--trusted-proxy-hops` 0 |
-| Tracing | `--otel-endpoint`, `--otel-project`, `--otel-token-secret` |
+| Tracing | `--otel-endpoint`, `--otel-project`, `--otel-service-name` (default `xray`; one per instance tells instances apart), `--otel-token-secret` |
 
 ### Chart
 
@@ -511,6 +522,8 @@ Flags set the baseline. The configuration cell and the chart's `values.yaml` ove
 | dev | Adds `--dev`: sign-in off, any origin accepted. For a first look through a port-forward only; without it the server refuses to start until a sign-in method and `--public-url` are set |
 | github.secretName, azure.secretName, google.secretName | The Secret holding the sign-in client id and secret. Empty by default, so a fresh install needs no Secret of its own besides the MCP token |
 | imagePullSecrets | Secrets for pulling the images from a private registry |
+| voice.sessionResumption | Adds `--voice-session-resumption`. Off by default; `voice.systemConfig.sessionResumption` sets the per-instance override in the configuration cell |
+| voice.contextTriggerTokens, voice.contextTargetTokens | Add `--voice-context-trigger-tokens` and `--voice-context-target-tokens`. Off by default; `voice.systemConfig.contextTriggerTokens` and `contextTargetTokens` set the per-instance override |
 | ingress, httpRoute | An Ingress, or a Gateway API route, in front of the server |
 
 The chart installs the `MemoryCell` CRD from its `crds` directory on first install. Helm does not upgrade CRDs, so apply a changed CRD by hand.

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 
 import { setLiveQuota, type LiveQuota } from "@/lib/quota-store"
 import { endpoints, wsProtocols, getApiTenant } from "@/lib/api"
+import { API_MOUNT } from "@/lib/utils"
 
 export type VoiceStatus = "idle" | "connecting" | "active" | "error"
 
@@ -147,7 +148,7 @@ export function useVoiceSession({ enabled, onDone, pinnedIds }: { enabled: boole
         if (!secure && !isLocalHost(window.location.hostname)) {
           throw new Error("Refusing to open an unencrypted voice connection — serve this UI over HTTPS.")
         }
-        const wsUrl = new URL(`${secure ? "wss:" : "ws:"}//${window.location.host}${endpoints.voice}`)
+        const wsUrl = new URL(`${secure ? "wss:" : "ws:"}//${window.location.host}${API_MOUNT}${endpoints.voice}`)
         // Pin the tenant explicitly. The core's binding ladder treats ?tenant=
         // as the highest-precedence pin below a meeting token, so without it a
         // multi-tenant user's session falls through to the unbound operator

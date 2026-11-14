@@ -310,3 +310,56 @@ func TestStore_SemanticSearchWithAnEmbeddingEndpoint(t *testing.T) {
 	none, _ := plain.Search(ctx, "incident")
 	assert.Empty(t, none, "without an embedding endpoint, a synonym finds nothing")
 }
+
+// windowServer is llama.cpp with a 512-token window: POST /tokenize counts one
+// token per two bytes plus two special tokens, and /v1/embeddings refuses an
+// input over the window with 400. It counts tokenize calls and refusals.
+func windowServer(t *testing.T, tokenizes, refused *int) string {
+	t.Helper()
+	count := func(s string) int { return (len(s)+1)/2 + 2 }
+	mux := http.NewServeMux()
+	mux.HandleFunc("/tokenize", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Content string `json:"content"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		*tokenizes++
+		_ = json.NewEncoder(w).Encode(map[string]any{"tokens": make([]int, count(req.Content))})
+	})
+	mux.HandleFunc("/v1/embeddings", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Input string `json:"input"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if count(req.Input) > 512 {
+			*refused++
+			http.Error(w, `{"error":{"code":400,"type":"exceed_context_size_error"}}`, http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"embedding": hashEmbed(req.Input)}}})
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	return ts.URL
+}
+
+func TestStore_WithMaxInputTokensCutsAnItemToTheModelsWindow(t *testing.T) {
+	dense := xray.Write{Kind: xray.KindOperationalPattern, Scope: xray.ScopePublic, Title: "Key rotation controls",
+		Content: strings.Repeat("| control | owner | review cadence |\n", 33)} // about 620 tokens
+	for _, window := range []int{0, 512} {
+		var tokenizes, refused int
+		opts := []memory.Option{memory.WithEmbeddings(windowServer(t, &tokenizes, &refused), "nomic", 16)}
+		if window > 0 {
+			opts = append(opts, memory.WithMaxInputTokens(window))
+		}
+		_, err := newStore(t, opts...).Upsert(context.Background(), dense)
+		require.NoError(t, err)
+		if window == 0 {
+			assert.Zero(t, tokenizes, "without the option nothing is counted")
+			assert.Equal(t, 1, refused, "without the option the model refuses the item")
+		} else {
+			assert.Positive(t, tokenizes, "the option reaches the embedder")
+			assert.Zero(t, refused, "with the option the item is cut to fit")
+		}
+	}
+}

@@ -75,6 +75,8 @@ args:
   - --embedding-model=nomic-embed-text
   - --embedding-dims=256
   - --embedding-max-input-chars=8192
+  # - --embedding-max-input-tokens=2048   # the sidecar model's window in tokens; an input over it is cut to fit.
+  #   Set it for a small-window model (512 for nomic-embed-text-v2-moe); maps must be built with the same value.
   - --mental-maps-dir=/snapshots
   - --episodic-ttl=168h
   - --max-request-bytes=1048576
@@ -85,6 +87,8 @@ args:
   # Sign-in, required unless --dev. Create the Secret named by github.secretName
   # (or azure.secretName, google.secretName), set that value, and add:
   # - --public-url=https://xray.example.com
+  #   (a path, https://gw.example.com/path, mounts the server there; the image's
+  #   UI must be built with BASE_PATH=/path)
   # - --github-org=YOUR_GITHUB_ORG      # required with GitHub sign-in (or --allow-any-user)
   #
   # MCP over OAuth on the main port, with a token per user (set mcp.oauth.enabled
@@ -103,6 +107,7 @@ args:
   # Tracing (OTLP over gRPC, usually port 4317):
   # - --otel-endpoint=http://collector.example.svc:4317
   # - --otel-project=xray
+  # - --otel-service-name=xray
   # - --otel-token-secret=otlp-token   # Secret in this namespace, key "token", sent as a bearer header
   #
   # A UI on another host that signs in against this API: each listed origin may
@@ -267,6 +272,19 @@ voice:
   # Proactive audio: the model may stay silent on out-of-context / background
   # speech instead of replying to everything. Native-audio only.
   proactiveAudio: true
+  # Session resumption (ADR-039): on a Gemini Live GoAway (the ~10-minute
+  # connection recycle) or a dropped connection, reconnect upstream with the
+  # latest resumption handle and keep the browser connected. true adds
+  # --voice-session-resumption to the container args. Off by default.
+  # sessionResumption: false
+  # Context window compression (ADR-039): once a session's context passes
+  # contextTriggerTokens (5000-128000) the oldest turns are dropped, so a long
+  # session does not hit the audio-only session limit. Adds
+  # --voice-context-trigger-tokens (and --voice-context-target-tokens, below the
+  # trigger; 0 = the server's default, half the trigger). Off by default; core
+  # uses 32000 / 16000.
+  # contextTriggerTokens: 32000
+  # contextTargetTokens: 16000
 
   # system_configuration MemoryCell — voice session config managed by Helm.
   # Changing any field here and running helm upgrade will patch the CR in-cluster.
@@ -297,6 +315,14 @@ voice:
     # / --voice-proactive-audio flag defaults; set explicitly to override per session.
     # affectiveDialog: true
     # proactiveAudio: true
+    # Session resumption per instance (ADR-039). Omit (unset) to use the
+    # --voice-session-resumption flag; set explicitly to override it.
+    # sessionResumption: true
+    # Context compression per instance (ADR-039). Omit to use the
+    # --voice-context-trigger-tokens / --voice-context-target-tokens flags; a
+    # trigger set here wins, and the target goes with it.
+    # contextTriggerTokens: 32000
+    # contextTargetTokens: 16000
     # Remote MCP servers wired into voice sessions. Empty = none.
     # NOTE: the former `xray-code` remote MCP service was REMOVED — the code-graph
     # tools (search_graph, search_graph_docs, get_graph_node,

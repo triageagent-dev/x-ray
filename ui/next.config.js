@@ -19,7 +19,8 @@ if (process.env.NEXT_BUILD_EXPORT === 'true') {
   // Note what is deliberately NOT prefixed: lib/api.ts builds root-relative
   // /v1 URLs, which is what keeps API calls on the origin ROOT where the API
   // itself answers them — the UI is a peer of the API here, not a proxy in
-  // front of it.
+  // front of it. When the server itself is mounted under the path, the build
+  // also sets NEXT_PUBLIC_API_URL to it (make build BASE_PATH=/path).
   if (process.env.NEXT_BASE_PATH) {
     nextConfig.basePath = process.env.NEXT_BASE_PATH
   }

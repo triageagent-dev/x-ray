@@ -39,7 +39,8 @@ func runServe(argv []string) error {
 	endpoint := fs.String("embedding-endpoint", "http://localhost:8090", "OpenAI-compatible /v1/embeddings endpoint (llama.cpp)")
 	model := fs.String("embedding-model", "nomic", "embedding model name")
 	dims := fs.Int("embedding-dims", 256, "embedding output dimensions (Matryoshka truncation)")
-	maxInputChars := fs.Int("embedding-max-input-chars", 8192, "hard char cap on a node's text before embedding — set below the model's token window × ~3.5 (nomic 2048-tok → 8192; bge/MiniLM 512-tok → ~1800) so oversized inputs are TRUNCATED, not rejected by the model")
+	maxInputChars := fs.Int("embedding-max-input-chars", 8192, "hard cap in bytes on a node's text before embedding — set below the model's token window × ~3.5 (nomic 2048-tok → 8192; bge/MiniLM 512-tok → ~1800). A bound, not a fit: bytes per token vary with the text, so a dense input under the cap can still exceed the window and be rejected by the model; -embedding-max-input-tokens cuts it to the window")
+	maxInputTokens := fs.Int("embedding-max-input-tokens", 0, "the model's input window in tokens (0 = unknown); an input over it is cut to the longest prefix that fits, counted by the endpoint's own tokenizer (llama.cpp POST /tokenize). nomic-embed-text-v2-moe reads 512.")
 	bruteForce := fs.Bool("brute-force", false, "use the exact O(N·D) brute-force cosine scan instead of the HNSW ANN index (for A/B comparison; HNSW is the default)")
 	snapshotDir := fs.String("snapshot-dir", "", "if set, periodically + on shutdown write each repo's live graph to <dir>/<label>.graph.gob.gz (with persisted HNSW), so the latest .gob is always on disk and pushable as an OCI snapshot image. Empty = in-memory only.")
 	snapshotEvery := fs.Duration("snapshot-interval", 5*time.Minute, "how often to flush the live graph to -snapshot-dir (0 = only on shutdown)")
@@ -65,8 +66,9 @@ func runServe(argv []string) error {
 	if err != nil {
 		return fmt.Errorf("embedder: %w", err)
 	}
+	embedder.SetMaxInputTokens(*maxInputTokens)
 
-	fp := engine.EmbedFingerprint{Model: *model, Dims: *dims, MaxInputChars: *maxInputChars}
+	fp := engine.EmbedFingerprint{Model: *model, Dims: *dims, MaxInputChars: *maxInputChars, MaxInputTokens: *maxInputTokens}
 
 	// Warm seed: when -snapshot-dir already holds this repo's gob, rebuild the live
 	// graph from it instead of re-parsing and re-embedding every node. The gob
