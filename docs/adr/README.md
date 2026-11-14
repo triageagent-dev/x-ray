@@ -67,6 +67,7 @@
 | [062](062-memory-engine-as-a-library.md) | The Memory Engine Is a Library | Implemented | — | `TestDecide_*`, `TestStore_*`, `TestStore_FileFromAnEarlierReleaseStillLoads` |
 | [063](063-google-sign-in.md) | Google Sign-In, Restricted to a Workspace Domain | Implemented | — | `TestGoogleIdentity_*`, `TestGoogleCallback_*`, `TestGoogleLogin_RedirectsWithStateAndDomainHint`, `TestServer_GoogleRoutesAndProvider`, `TestMCPSigningSeed_UnchangedWithoutGoogle` |
 | [064](064-serving-under-a-path.md) | Serving Under a Path on a Shared Host | Implemented | — | `TestBasePath`, `TestServer_BasePath_*`, `TestPublicOrigin`, `TestBuiltFor` |
+| [065](065-pre-registered-mcp-client.md) | Pre-registered Public MCP Client | Implemented | — | `TestMCPAuth_*` |
 | [066](066-access-grants.md) | Access Granted by the Deployment, Then by Identity-Provider Groups | Phase 1 implemented | — | `TestAccessGrants_*`, `TestGoogleCallback_*`, `TestMCPAuth_*`, `TestNewAccessGrants_*`, `TestPromptName_*`, `TestRequireSession_*`, `TestSessions_*`, `TestVoiceTools_*`, `TestVoiceWriters_*` |
 
 **Statuses:** `Implemented` = code merged; `Accepted` = decided, pending implementation; `Reference` = living doc, not a decision.
