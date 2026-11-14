@@ -97,6 +97,7 @@ args:
   # - --mcp-address=
   # - --mcp-resource-url=https://xray.example.com/mcp
   # - --mcp-token-ttl=3h
+  # - --mcp-member-access   # signed-in non-admins read shared memory and keep their own notes
   #
   # Voice (Gemini Live) on Vertex AI, or with --gemini-api-key:
   # - --gcp-project=YOUR_GCP_PROJECT
