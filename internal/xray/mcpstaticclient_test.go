@@ -14,30 +14,30 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// A pre-registered public client (Claude.ai's custom connector form takes a client
-// ID): its redirect_uris are fixed at startup, so open DCR need not accept them.
+// A pre-registered public client (a client given an ID, not registering itself): its
+// redirect_uris are fixed at startup, so open DCR need not accept them.
 
-const claudeCallback = "https://claude.example/api/mcp/auth_callback"
+const connectorCallback = "https://connector.example/api/mcp/auth_callback"
 
 func TestMCPAuth_StaticClientAllowsOnlyItsRedirects(t *testing.T) {
 	a := newTestAuthorizer(t, false, nil)
-	require.NoError(t, a.SetStaticClient("connector-1", []string{claudeCallback}))
-	assert.True(t, a.clientRedirectAllowed("connector-1", claudeCallback))
+	require.NoError(t, a.SetStaticClient("connector-1", []string{connectorCallback}))
+	assert.True(t, a.clientRedirectAllowed("connector-1", connectorCallback))
 	assert.False(t, a.clientRedirectAllowed("connector-1", "https://evil.example/api/mcp/auth_callback"))
 	assert.False(t, a.clientRedirectAllowed("connector-1", "http://localhost:9999/cb"),
 		"a static client is not widened by the DCR loopback rule")
-	assert.False(t, isAllowedDCRRedirectURI(claudeCallback), "open registration still refuses a public host")
-	assert.False(t, a.clientRedirectAllowed("someone-else", claudeCallback))
+	assert.False(t, isAllowedDCRRedirectURI(connectorCallback), "open registration still refuses a public host")
+	assert.False(t, a.clientRedirectAllowed("someone-else", connectorCallback))
 }
 
 func TestMCPAuth_StaticClientValidation(t *testing.T) {
 	a := newTestAuthorizer(t, false, nil)
-	assert.Error(t, a.SetStaticClient("short", []string{claudeCallback}), "client ID under 8 characters")
+	assert.Error(t, a.SetStaticClient("short", []string{connectorCallback}), "client ID under 8 characters")
 	assert.Error(t, a.SetStaticClient("connector-1", nil), "no redirect URI")
-	assert.Error(t, a.SetStaticClient("connector-1", []string{"http://claude.example/cb"}), "plain http off loopback")
+	assert.Error(t, a.SetStaticClient("connector-1", []string{"http://connector.example/cb"}), "plain http off loopback")
 	assert.Error(t, a.SetStaticClient("connector-1", []string{"/api/mcp/auth_callback"}), "relative")
-	assert.Error(t, a.SetStaticClient("connector-1", []string{"https://claude.example/cb#frag"}), "fragment")
-	assert.NoError(t, a.SetStaticClient("connector-1", []string{"http://localhost:3000/cb", claudeCallback}))
+	assert.Error(t, a.SetStaticClient("connector-1", []string{"https://connector.example/cb#frag"}), "fragment")
+	assert.NoError(t, a.SetStaticClient("connector-1", []string{"http://localhost:3000/cb", connectorCallback}))
 }
 
 // A pre-registered client's code goes to an https callback shared by every user of
@@ -49,7 +49,7 @@ func staticAuthorize(t *testing.T, a *mcpAuthorizer, sessTok, challenge, extra s
 	q := url.Values{}
 	q.Set("response_type", "code")
 	q.Set("client_id", "connector-1")
-	q.Set("redirect_uri", claudeCallback)
+	q.Set("redirect_uri", connectorCallback)
 	q.Set("code_challenge", challenge)
 	q.Set("code_challenge_method", "S256")
 	q.Set("state", "st-1")
@@ -73,7 +73,7 @@ func consentLink(t *testing.T, page string) string {
 func newStaticAuthorizer(t *testing.T) (*mcpAuthorizer, string) {
 	t.Helper()
 	a := newTestAuthorizer(t, false, []string{stableUserID("google:42")})
-	require.NoError(t, a.SetStaticClient("connector-1", []string{claudeCallback}))
+	require.NoError(t, a.SetStaticClient("connector-1", []string{connectorCallback}))
 	sessTok := sessions.create("alice", "google:42")
 	t.Cleanup(func() { sessions.invalidate(sessTok) })
 	return a, sessTok
@@ -87,7 +87,7 @@ func TestMCPAuth_StaticClientAsksForConsent(t *testing.T) {
 	assert.Empty(t, rec.Header().Get("Location"), "no code without the user's approval")
 	body := rec.Body.String()
 	assert.Contains(t, body, "connector-1")
-	assert.Contains(t, body, "claude.example")
+	assert.Contains(t, body, "connector.example")
 	assert.Contains(t, body, "alice")
 }
 
@@ -99,7 +99,7 @@ func TestMCPAuth_StaticClientIssuesCodeAfterConsent(t *testing.T) {
 	require.Equal(t, http.StatusFound, rec.Code)
 	loc, err := url.Parse(rec.Header().Get("Location"))
 	require.NoError(t, err)
-	assert.Equal(t, "claude.example", loc.Host)
+	assert.Equal(t, "connector.example", loc.Host)
 	assert.NotEmpty(t, loc.Query().Get("code"))
 	assert.Equal(t, "st-1", loc.Query().Get("state"))
 }
@@ -121,7 +121,7 @@ func TestMCPAuth_ConsentIsBoundToSessionAndRequest(t *testing.T) {
 
 func TestMCPAuth_ConsentExpires(t *testing.T) {
 	a, sessTok := newStaticAuthorizer(t)
-	q := url.Values{"client_id": {"connector-1"}, "redirect_uri": {claudeCallback}, "code_challenge": {"c"}}
+	q := url.Values{"client_id": {"connector-1"}, "redirect_uri": {connectorCallback}, "code_challenge": {"c"}}
 	expired := a.consentToken(sessTok, q, time.Now().Add(-time.Second))
 	assert.False(t, a.consentValid(sessTok, q, expired))
 	assert.True(t, a.consentValid(sessTok, q, a.consentToken(sessTok, q, time.Now().Add(time.Minute))))

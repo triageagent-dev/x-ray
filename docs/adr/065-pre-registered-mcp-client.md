@@ -6,9 +6,9 @@
 
 Open dynamic client registration (RFC 7591) accepts only loopback and custom-scheme
 redirect URIs, so a registration from anywhere cannot point authorization codes at a
-public host. That fits Claude Code, which listens on localhost. A Claude.ai custom
-connector does not: it posts the code to its own https callback, and its form takes a
-client ID for a server that does not want open registration from the internet.
+public host. That fits Claude Code, which listens on localhost. A hosted MCP client
+does not: it posts the code to its own https callback, and it is given a client ID for a
+server that does not want open registration from the internet.
 
 ## Decision
 
@@ -31,8 +31,8 @@ client (PKCE, no secret) at startup.
 
 ## Consequences
 
-- A Claude.ai connector works with the client ID entered and the secret left empty, and the
-  registration endpoint need not be reachable from Claude's cloud.
+- Such a client works with the client ID entered and the secret left empty, and the
+  registration endpoint need not be reachable from the client's servers.
 - A user still needs a session and a place on `writeAllowedUsers` to be issued a token.
 
 ## Residual risk
