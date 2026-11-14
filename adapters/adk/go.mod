@@ -3,7 +3,7 @@ module github.com/triageagent-dev/x-ray/adapters/adk
 go 1.27.3
 
 require (
-	github.com/mark3labs/mcp-go v0.50.0
+	github.com/mark3labs/mcp-go v0.58.0
 	github.com/stretchr/testify v1.12.1
 	github.com/triageagent-dev/x-ray/v2 v2.1.0
 	google.golang.org/adk v1.9.0
