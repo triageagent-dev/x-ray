@@ -85,7 +85,7 @@ func (g *githubAuth) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// Resolved (and allowlist-checked) HERE rather than at the callback, so an
 	// unapproved origin is dropped before it is ever bound to a live login.
 	state := g.newState(resolveUIOrigin(r.URL.Query().Get("ui"), g.cfg.UICallbackOrigins))
-	setStateCookie(w, state)
+	setStateCookie(w, BasePath(g.cfg.PublicURL), state)
 	callbackURL := g.cfg.PublicURL + "/v1/auth/github/callback"
 	authURL := fmt.Sprintf(
 		"https://github.com/login/oauth/authorize?client_id=%s&redirect_uri=%s&scope=read:org&state=%s",
@@ -104,7 +104,7 @@ func (g *githubAuth) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 	// Bind the callback to the browser that started login: the query state must
 	// match the signed state cookie set in handleLogin. Defeats login-CSRF.
-	clearStateCookie(w)
+	clearStateCookie(w, BasePath(g.cfg.PublicURL))
 	if !stateCookieMatches(r, state) {
 		http.Error(w, "invalid state", http.StatusBadRequest)
 		return
@@ -149,11 +149,15 @@ func (g *githubAuth) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 	// Create X-Ray session. userID is "github:<numericID>" — globally unique, never reassigned.
 	userID := "github:" + numericID
+	if !grants.allowsUser(userID, login) {
+		http.Error(w, "not granted access to this instance", http.StatusForbidden)
+		return
+	}
 	token := sessions.create(login, userID)
 	http.SetCookie(w, &http.Cookie{
 		Name:     "xray_session",
 		Value:    token,
-		Path:     "/",
+		Path:     BasePath(g.cfg.PublicURL) + "/",
 		MaxAge:   86400,
 		HttpOnly: true,
 		Secure:   true,
@@ -162,7 +166,7 @@ func (g *githubAuth) handleCallback(w http.ResponseWriter, r *http.Request) {
 	// Same-origin logins land on "/" and use the cookie just set. A login that
 	// asked for an allowlisted UI origin is bounced there with the token
 	// instead, because that host will never receive this cookie.
-	http.Redirect(w, r, uiCallbackRedirect(st.uiOrigin, token), http.StatusFound)
+	http.Redirect(w, r, uiCallbackRedirect(st.uiOrigin, token, BasePath(g.cfg.PublicURL)), http.StatusFound)
 }
 
 // handleLogout clears the session cookie and invalidates the server-side session.
@@ -172,13 +176,13 @@ func (g *githubAuth) handleLogout(w http.ResponseWriter, r *http.Request) {
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     "xray_session",
-		Path:     "/",
+		Path:     BasePath(g.cfg.PublicURL) + "/",
 		MaxAge:   -1,
 		HttpOnly: true,
 		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
 	})
-	http.Redirect(w, r, "/login", http.StatusFound)
+	http.Redirect(w, r, BasePath(g.cfg.PublicURL)+"/login", http.StatusFound)
 }
 
 // exchangeCode POSTs to GitHub to exchange an OAuth code for an access token.

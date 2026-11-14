@@ -212,6 +212,7 @@ func runServiceMap(argv []string) error {
 	model := fs.String("embedding-model", "nomic", "embedding model name")
 	dims := fs.Int("embedding-dims", 256, "embedding output dimensions (Matryoshka truncation)")
 	maxInputChars := fs.Int("embedding-max-input-chars", 8192, "hard char cap on a node's text before embedding")
+	maxInputTokens := fs.Int("embedding-max-input-tokens", 0, "the model's input window in tokens (0 = unknown); an input over it is cut to the longest prefix that fits, counted by the endpoint's own tokenizer (llama.cpp POST /tokenize). nomic-embed-text-v2-moe reads 512.")
 	logLevel := fs.String("log-level", "info", "debug|info|warn|error")
 	summary := fs.String("summary", "", `explicit router description for this map — what questions it answers, e.g. "students of the team course: who they are, their experience, tools and expectations". A catalog has no README, so without it the map routes on a stats line ("code graph (Answer=111 Student=37)") that carries no topical signal, and a bare unmapped question never lands here.`)
 	keyPath := snapshotKeyFlag(fs)
@@ -244,7 +245,8 @@ func runServiceMap(argv []string) error {
 	if err != nil {
 		return fmt.Errorf("embedder: %w", err)
 	}
-	fp := engine.EmbedFingerprint{Model: *model, Dims: *dims, MaxInputChars: *maxInputChars}
+	embedder.SetMaxInputTokens(*maxInputTokens)
+	fp := engine.EmbedFingerprint{Model: *model, Dims: *dims, MaxInputChars: *maxInputChars, MaxInputTokens: *maxInputTokens}
 	snap, st, err := buildCatalogSnapshot(ctx, entries, *label, *in, *summary, embedder, fp, logger)
 	if err != nil {
 		return err

@@ -8,7 +8,7 @@ import { StatsHud } from "@/components/stats-hud"
 import { useVoiceSession } from "@/hooks/use-voice-session"
 import { useLiveQuota, type LiveQuota } from "@/lib/quota-store"
 import { useAuth } from "@/hooks/use-auth"
-import { apiFetch, fetchUserNotes, subscribeMemoryEvents, hitKindMap, type MemoryItemSummary, api } from "@/lib/api"
+import { apiFetch, fetchUserNotes, subscribeMemoryEvents, hitKindMap, hitTagMap, type MemoryItemSummary, api } from "@/lib/api"
 import { useTenant } from "@/components/tenant-provider"
 import { Search, LogOut } from "lucide-react"
 import { cn, UI_VERSION } from "@/lib/utils"
@@ -242,6 +242,7 @@ export default function MemoryIndexPage() {
   // (no live hit) or the server hasn't sent kinds; MemoryGraph degrades to
   // cell-only flashing in that case.
   const hitKinds = useMemo(() => hitKindMap(hits), [hits])
+  const hitTags = useMemo(() => hitTagMap(hits), [hits])
 
   const handleSelect = useCallback((id: string, screenX: number, screenY: number, kind?: string) => {
     setActive(prev => prev?.id === id ? null : { id, kind, ...anchorPos(screenX, screenY) })
@@ -282,6 +283,7 @@ export default function MemoryIndexPage() {
         query={query}
         highlightIds={highlightIds}
         hitKinds={hitKinds}
+        hitTags={hitTags}
         hitKey={hitKey}
         extraItems={userNotes}
         onSelect={handleSelect}

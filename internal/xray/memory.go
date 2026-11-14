@@ -308,11 +308,24 @@ func (s *MemoryStore) publishDelete(it memstore.Item) {
 }
 
 // PublishHit broadcasts a memory search hit event. kinds must be parallel to
-// itemIDs. The event reaches every connected client, so it carries ids and kinds
-// only: the query is what a person asked and is not theirs to share, and callers
-// pass shared items only (see sharedHit).
+// itemIDs. The event reaches every connected client, so it carries ids, kinds
+// and the tags of shared items only: the query is what a person asked and is not
+// theirs to share, and callers pass shared items only (see sharedHit). The tags
+// let the graph place a hit in a category split off its kind by tag (ADR-035).
 func (s *MemoryStore) PublishHit(itemIDs []string, kind string, kinds []string) {
-	s.hub.PublishHit(hub.HitEvent{ItemIDs: itemIDs, Kind: kind, Kinds: kinds})
+	// The tags are re-read from the store on purpose: this is the one place that
+	// decides what the shared stream may name, whatever the caller passed.
+	tags := make([][]string, len(itemIDs))
+	tagged := false
+	for i, id := range itemIDs {
+		if it := s.Get(id); it != nil && !isPrivateItem(it.Kind, it.Scope) && len(it.Tags) > 0 {
+			tags[i], tagged = it.Tags, true
+		}
+	}
+	if !tagged {
+		tags = nil // a store without tags keeps the event as it was
+	}
+	s.hub.PublishHit(hub.HitEvent{ItemIDs: itemIDs, Kind: kind, Kinds: kinds, Tags: tags})
 }
 
 // sharedHit publishes a hit for the shared items among items. A private item's

@@ -1,8 +1,17 @@
 # ADR-039: Voice Session Longevity & Conversation Quality — GoAway, Resumption, Compression, Affective Dialog, Proactive Audio
 
-**Status:** Accepted
+**Status:** Accepted — capabilities 1, 2 and 3 implemented (2026-11-09)
 **Date:** 2026-06-03
 **Todo:** [voice-session-longevity](../todo/voice-session-longevity.md)
+
+> **Implemented (2026-11-09): capabilities 1 (GoAway awareness) and 2
+> (transparent session resumption),** plus a teardown fix. See
+> [As built: capabilities 1 and 2](#as-built-capabilities-1-and-2) for where the
+> implementation differs from the design below.
+>
+> **Implemented (2026-11-09): capability 3 (context window compression).** See
+> [As built: capability 3](#as-built-capability-3). Capabilities 4 and 5 are
+> unchanged by these notes.
 
 > **Changes (2026-06-09):** The Google AI non-native model referenced below as an
 > example, `gemini-2.0-flash-live-001`, was retired by Google on 2025-12-09. Both
@@ -318,6 +327,212 @@ Capability 1 (GoAway awareness) is **independently mergeable and valuable on its
 own** — it has no reconnect machinery, only adds a log line + browser message,
 and converts today's silent drop into an observed event. Capabilities 2 and 3
 can land in the same commit or a follow-up. If splitting, 1 ships first.
+
+## As built: capabilities 1 and 2
+
+Production evidence (x-ray 2.7.0, Gemini Live on Vertex `eu`): 7 sessions ended at
+9m31s–9m50s with `close 1000 (normal): GoAway deadline exceeded` (the connection
+recycle, GoAway ignored), and 6 ended at 0m44s–7m44s with `close 1006 (abnormal
+closure): unexpected EOF` (an upstream drop without a close frame). Both now
+resume when the flag is on.
+
+- **Seam.** `VoiceSession.live` is a `liveConn` interface (the five methods of
+  `*genai.Session` the session uses), and `VoiceSession.connect` opens one
+  (`Live.Connect` in production). Tests drive a fake.
+- **Config.** Instead of a `buildLiveConfig()` that rebuilds the literal, the
+  session stores the config it built once (`liveConfig`) and `liveConfigFor(handle)`
+  returns a copy: unchanged with resumption off (byte-identical to before), with
+  `SessionResumption{Handle: handle, Transparent: transparent}` with it on. The
+  initial connect asks with an empty handle so the server sends
+  `SessionResumptionUpdate`s. `transparent` is on only on Vertex: the SDK refuses
+  to connect to the Gemini Developer API with it set.
+- **Handle.** Stored only when the update is `Resumable` and carries a
+  `NewHandle` (the SDK sends an empty handle with `Resumable=false` while the
+  model is generating or running tools). Guarded by `liveMu`.
+- **GoAway (capability 1).** Logged at warn with `time_left` and whether the
+  session will resume, and recorded as the span event `voice.goaway`
+  (`time_left_ms`). No metric, and no `SessionEnding` browser message: with
+  resumption the reconnect is invisible to the browser, and the UI has no handler
+  for it yet.
+- **GoAway reconnect: at once in silence, after the turn otherwise.** Three live
+  tests on 2026-11-09 (Vertex `eu`, `gemini-3.8-live`, `time_left=30s`) set this.
+  First, without replay: a GoAway arrived while the user was asking a question,
+  the session reconnected at once (282 ms), the part of the question streamed to
+  the old connection was lost and the model answered only the rest. Second, with
+  the reconnect always deferred to the end of the turn: the GoAway came in
+  silence, no turn followed, the connection closed, and the reconnect replayed
+  65 s of buffered silence in one burst. Third, reconnecting at once with a 10 s
+  bound: it replayed 10 s of silence in one burst. Both times Vertex ended the
+  new stream with 429 RESOURCE_EXHAUSTED (`1011 Resource has been exhausted`,
+  matching 429s on `BidiGenerateContent` in Cloud Monitoring at those minutes)
+  and the session ended, while the first test's resume with nothing to replay
+  held. Probes from a laptop accepted bursts of up to 20 s, so the threshold is
+  not a fixed size; the rule is to send no silence and no audio faster than real
+  time. Now a GoAway reconnects at once only when nobody is speaking: the model is
+  idle (`modelTurnOpen`: set by model content or a tool call, cleared by
+  `TurnComplete` or `Interrupted`), no user speech was transcribed since the last
+  `TurnComplete` (`userTurnOpen`), and no microphone frame with speech arrived in
+  the last 1.5 s (`lastSpeechNano`, `userSpeechHold`). The replay then has only
+  silence, which it skips. Otherwise the GoAway marks the session
+  (`resumeAtTurnEnd`) and the reconnect happens on the first resumable handle
+  after the next `TurnComplete` (`resumeAtHandle`): that handle, not the held one,
+  because a resumable handle arrives right after each model `TurnComplete` in its
+  own message, so the held one predates the answer and resuming from it with the
+  replay would make the model answer again. If the connection ends first, the
+  receive-error path resumes it.
+- **Transparent replay (Vertex).** Every client message (audio frame,
+  `audioStreamEnd`, text, greeting, the daily-limit farewell, tool responses) goes
+  through `sendLocked`, which numbers it on the current connection from 1 and
+  keeps it in `replay` before sending, so a send that fails on a dying connection
+  is kept too. A resumable handle drops the kept messages up to its
+  `LastConsumedClientMessageIndex` (`holdHandleLocked`); a non-resumable update
+  drops none (its index belongs to no handle we hold); an update without the index
+  (a server that ignores `transparent`) drops all, falling back to the behaviour
+  without replay instead of resending what the handle holds. `reconnect` installs
+  the new session and, still under `liveMu` and before any other send, sends the
+  kept messages again in order (`replayLocked`). The counting: each `Send*` of the
+  SDK writes one WebSocket frame, one client message; the SDK doc defines the
+  index as that of the last client message included in the handle's state, and a
+  probe on Vertex `eu`, `gemini-3.8-live` (2026-11-09) confirmed the counting: 97
+  messages sent, index 97 reported (setup not counted, the first message after it
+  is 1), and on a resumed connection the index started again from 1 (55 reported
+  after 60 sent). A resumed connection is counted from 1 again and the held handle
+  predates it, so the replayed messages are numbered and kept
+  afresh as they are sent; a second drop before the next handle resumes from the
+  same handle and replays them again. An index above the messages sent on the
+  connection is logged at warn, since it would mean the server counts otherwise
+  (setup included, or across connections). Unprobed: how the server takes a
+  replayed tool response when the handle predates the tool call (a drop between
+  the call and the next handle).
+- **Replay: speech only, at its own pace.** A replay skips the silent
+  microphone frames before the first frame with speech (`quiet`: no 16-bit sample
+  reaches `quietPeak = 500`; the browser captures with noise suppression and
+  automatic gain, so silence stays far below it) and sends the rest through the
+  same pacing as live audio. It holds `liveMu` meanwhile, so new browser frames
+  queue behind it, and a reconnect logs `skipped_silent` with the rest. A noise
+  burst that passes the gate is only replayed or waited for; speech below it
+  before the first loud frame of a drop is lost.
+- **Pacing (`paceLocked`).** No microphone audio reaches Gemini faster than real
+  time: the frames sent may run at most `audioLead = 250 ms` ahead of a clock
+  that advances by each frame's playing time (`audio`, 32 bytes a millisecond),
+  and a frame that would run further waits, under `liveMu`, until the clock
+  allows it or the session's context ends. A silent frame that would wait is
+  dropped instead (not sent, not numbered, not kept), so the backlog that queues
+  behind a replay drains in the next silence instead of following the replay as
+  a burst; the server's end-of-speech detection then sees the silence once the
+  clock has caught up. Live audio from the browser arrives at real time and never
+  waits. Other messages are not paced.
+- **Replay bound.** `replayMaxBytes = 320,000` (about 10 s of microphone audio:
+  the browser sends a 128-sample frame, 256 bytes of 16 kHz PCM, every 8 ms, so
+  1,250 frames) and `replayMaxMessages = 2048`. Handles arrive only after model
+  turns, so in silence the buffer is always full; past either bound the oldest
+  microphone frames are dropped (`replayLost`, reported by a reconnect as
+  `lost_over_bound`). Text, `audioStreamEnd` and tool responses are not dropped
+  for that bound: they stay until a handle covers them, so a tool response sent
+  before a long spoken answer is still replayed after a drop. They have their own
+  hard cap (`replayMaxContent = 256` messages, `replayMaxContentBytes = 1 MiB`),
+  past which the oldest of them are dropped and counted too, so no client can
+  grow the buffer without limit. A user who talks for
+  more than 10 s without a model turn and is cut by a drop loses the start of it.
+- **Logging.** Each resumption update at debug (`resumable`, `last_consumed`);
+  each reconnect at info with `cause`, `took` (the connect), `handle_age` (since
+  the held handle arrived), `replayed`, `replayed_bytes` and `lost_over_bound`.
+- **Receive error.** `readFromGemini` reconnects when `canResume()` (flag on,
+  resumable handle held, context live, attempt unused) and continues; otherwise it
+  returns the error as before.
+- **Bound.** One reconnect attempt per drop (`maxResumeAttempts = 1`), no
+  backoff. The count resets only when a resumed session delivers content
+  (`ServerContent` or a tool call); a setup or a resumption update alone does not,
+  so a rejected handle, or a resumed session that drops right after them, ends the
+  session instead of looping, while a long session can still resume at every
+  recycle.
+- **Swap.** `reconnect()` holds `liveMu` throughout, opens the new session before
+  closing the old one (a failed attempt after a GoAway leaves the old one serving
+  until it ends), and assigns `s.live`; a send waiting on `liveMu` goes to the new
+  session. The server restores the conversation from the handle, and on Vertex
+  the replay above resends what the handle has not consumed. Teardown closes
+  `s.live` under `liveMu`, so it closes whichever session a reconnect in flight
+  leaves.
+- **Send during swap.** Browser frames go through `liveSend`: a send that fails
+  while the session can resume, or that hit a session a reconnect has since
+  replaced, does not end the session; on Vertex the frame is kept and replayed,
+  elsewhere it is lost.
+- **Not covered.** A drop while a tool response is being sent
+  (`SendToolResponse`) still ends the session, as before.
+- **Token counters** are atomics on `VoiceSession`, which outlives each
+  `*genai.Session`, so they keep accumulating across a reconnect.
+- **Wiring.** Flag `--voice-session-resumption` (default false) →
+  `NewVoiceManager`; CR `spec.voiceConfig.sessionResumption` (`api/v1`, `*bool`)
+  wins when set (`effectiveSessionResumption`); chart `voice.sessionResumption`
+  adds the flag to the container args, and `voice.systemConfig.sessionResumption`
+  sets the CR field.
+- **Teardown fix (always on).** When a session ends for any reason the server
+  sends the browser `Done`, then a close frame (1000 for a normal end, 1011 for an
+  upstream error), and closes the socket before waiting for its goroutines. The
+  browser reader returns at once instead of on the browser's next frame (16–104 s
+  later in production), and the client sees a clean close instead of 1006.
+
+Tests: `TestVoiceSession_GoAwayResumesWithHeldHandle`,
+`TestVoiceSession_GoAwayMidTurnResumesAtTurnComplete`,
+`TestVoiceSession_GoAwayMidTurnThenDropResumesOnce`,
+`TestVoiceSession_ReceiveErrorResumesWithHeldHandle`,
+`TestVoiceSession_SendFailureWhileResumableKeepsSession`,
+`TestVoiceSession_ResumptionOffEndsOnReceiveError`,
+`TestVoiceSession_NoHandleEndsOnReceiveError`,
+`TestVoiceSession_ResumeAttemptsAreBounded`,
+`TestVoiceSession_TeardownSendsCloseFrame`,
+`TestVoiceSession_LiveConfigAsksForResumptionOnlyWhenOn`,
+`TestVoiceManager_SessionResumptionCROverridesFlag`,
+`TestConfigWatcher_ParsesSessionResumption`,
+`TestVoiceSession_GoAwayWhileUserSpeaksResumesAfterTurnWithoutLoss` (no reconnect
+while the user speaks; every chunk reaches exactly one session in order, given the
+consumed index), `TestVoiceSession_DropMidUtteranceReplaysAfterConsumedIndex`
+(1006 mid-utterance: the new session gets the messages after the index, the
+greeting counted as message 1), `TestVoiceSession_ReplayBufferTrimmedByConsumedIndex`,
+`TestVoiceSession_ReplayBufferIsBounded` (a tool response outlives the audio
+after it), `TestVoiceSession_GoAwayAfterLongSilenceResumesAtOnceWithoutReplay`
+(the second and third live tests), `TestVoiceSession_GoAwayAfterInterruptionResumesAtOnce`,
+`TestVoiceSession_GoAwayAfterTranscribedSpeechWaitsForTheTurn`,
+`TestVoiceSession_ReplaySkipsLeadingSilenceAndKeepsThePace` (replay and the
+backlog behind it at real-time pace), `TestVoiceSession_PacedSendStopsOnCancel`,
+`TestIsQuiet`
+(`go test ./internal/xray -run 'TestVoiceSession_|TestVoiceManager_SessionResumption|TestConfigWatcher_ParsesSessionResumption' -race`).
+
+`TestVoiceSession_GoAwayResumesWithHeldHandle` and
+`TestVoiceSession_GoAwayMidTurnResumesAtTurnComplete` now push the `TurnComplete`
+and the handle that follows it and expect the reconnect on that handle (`h2`),
+where they expected a reconnect on the handle held at the GoAway (`h1`).
+Disabling the replay fails the first two new tests; reconnecting at once on a
+GoAway fails the first.
+
+## As built: capability 3
+
+Resumption keeps a session alive across the ~10-minute connection recycle; it
+does not bound the session's context. Gemini Live limits audio-only sessions to
+15 minutes without context window compression, and compression is what lifts
+that limit. The two are separate limits and both are needed for a session of
+unbounded length.
+
+- **Wiring.** Flags `--voice-context-trigger-tokens` and
+  `--voice-context-target-tokens` (both default 0 = off) → `NewVoiceManager`; CR
+  `spec.voiceConfig.contextTriggerTokens` and `contextTargetTokens` (`api/v1`,
+  `int`) win when the trigger is set (`contextCompression`); chart
+  `voice.contextTriggerTokens` / `voice.contextTargetTokens` add the flags, and
+  `voice.systemConfig.contextTriggerTokens` / `contextTargetTokens` set the CR
+  fields.
+- **The pair goes together.** A CR trigger brings its own target (0 = the
+  server's default, half the trigger); the flag target is never mixed into a CR
+  pair, and a CR target with no CR trigger is ignored.
+- **Validation.** The trigger must be within 5000-128000 and a non-zero target
+  below it; a target with no trigger, and negative values, are refused. The flags
+  are checked at startup (`ValidateContextCompression`) and the server does not
+  start on a bad pair. A bad CR pair is logged and the flags apply, so a wrong
+  edit of the configuration cell cannot make Gemini reject a session's setup.
+- **A resumed connection keeps it.** The compression is part of the session's
+  Live config, so `liveConfigFor` opens every resumed connection with it.
+- **Sizing.** The system instruction is never compressed, so the trigger only has
+  to clear the fixed per-turn floor (system prompt, tool schemas, pinned memory)
+  plus recent tool results. Core runs 32000 / 16000.
 
 ## Alternatives considered
 

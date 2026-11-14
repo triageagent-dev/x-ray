@@ -127,7 +127,8 @@ func (r *Registry) snapshotKeys() SnapshotKeys {
 // serves whatever GGUF is loaded, so a label difference (nomic vs
 // nomic-embed-text) over the same model is harmless — warn, don't reject.
 func (r *Registry) checkFingerprint(h *SnapshotHeader, src string) error {
-	if h.Fingerprint.Dims != r.fingerprint.Dims || h.Fingerprint.MaxInputChars != r.fingerprint.MaxInputChars {
+	if h.Fingerprint.Dims != r.fingerprint.Dims || h.Fingerprint.MaxInputChars != r.fingerprint.MaxInputChars ||
+		h.Fingerprint.MaxInputTokens != r.fingerprint.MaxInputTokens {
 		return fmt.Errorf("snapshot %s built with %+v, server uses %+v — rebuild with `xray-memory snapshot`",
 			src, h.Fingerprint, r.fingerprint)
 	}

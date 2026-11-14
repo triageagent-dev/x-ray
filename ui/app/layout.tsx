@@ -3,7 +3,7 @@ import { Inter } from "next/font/google"
 import { Toaster } from "@/components/ui/sonner"
 import { CategoryConfigLoader } from "@/components/category-config-loader"
 import { TenantProvider } from "@/components/tenant-provider"
-import { asset } from "@/lib/utils"
+import { API_MOUNT, asset } from "@/lib/utils"
 import "./globals.css"
 
 const inter = Inter({ subsets: ["latin"], variable: "--font-inter" })
@@ -17,7 +17,7 @@ export const metadata: Metadata = {
     icon: asset("/logo.svg"),
     apple: { url: asset("/apple-touch-icon.png"), sizes: "180x180", type: "image/png" },
   },
-  manifest: "/manifest.json",
+  manifest: `${API_MOUNT}/manifest.json`,
   appleWebApp: { capable: true, statusBarStyle: "black-translucent", title: "X-Ray" },
   other: { "mobile-web-app-capable": "yes" },
 }
@@ -36,7 +36,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="en">
       <head>
         <script dangerouslySetInnerHTML={{
-          __html: `if('serviceWorker' in navigator){window.addEventListener('load',()=>{navigator.serviceWorker.register('/sw.js').catch(()=>{})})}`,
+          __html: `if('serviceWorker' in navigator){window.addEventListener('load',()=>{navigator.serviceWorker.register('${API_MOUNT}/sw.js').catch(()=>{})})}`,
         }} />
       </head>
       <body className={`${inter.variable} font-sans`}>

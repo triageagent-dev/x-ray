@@ -106,7 +106,10 @@ export function StatsHud({ className }: { className?: string }) {
   return (
     <div className={cn(
       "pointer-events-none select-none tabular-nums",
-      "text-[10px] leading-[1.6] text-right font-mono",
+      // The size grows with the viewport, from 11 px on a laptop to 20 px on a
+      // large monitor (about 12 px at 1440 px wide, 16 px at 2560 px); a fixed
+      // 10 px was too small to read on a big screen.
+      "text-[clamp(11px,0.4vw+6px,20px)] leading-[1.6] text-right font-mono",
       "text-foreground/20",
       className
     )}>
