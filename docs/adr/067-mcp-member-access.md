@@ -9,7 +9,7 @@ notes, stored `scope=private`) is gated only by the `subject` argument the calle
 holder who passes another person's hash reads that person's notes. So `/authorize` issues tokens
 to admins only: the `writeAllowedUsers` list, or a principal in `--access-admins` (ADR-066).
 
-Employees who are not admins cannot use x-ray from Claude.ai, although voice already lets every
+Employees who are not admins cannot use x-ray from an MCP client, although voice already lets every
 signed-in user keep private notes. Only `upsert_memory`, which writes shared cells, needs the
 admin list there (ADR-037).
 
@@ -48,7 +48,7 @@ admin list there (ADR-037).
 
 ## Consequences
 
-- Members read shared knowledge and keep their own notes from Claude.ai. A note a member writes
+- Members read shared knowledge and keep their own notes from an MCP client. A note a member writes
   is the same cell the voice path reads for that user.
 - A member cannot read, change or delete anyone else's private cell, and cannot write or retire a
   shared cell.
@@ -66,6 +66,6 @@ Owner binding relies on a private cell's subject naming a person, the owner's us
 
 ## Alternatives
 
-- Keep MCP admin-only. Safe, but employees cannot use x-ray from Claude.ai at all.
+- Keep MCP admin-only. Safe, but employees cannot use x-ray from an MCP client at all.
 - A read-only token for public cells only. It gives no way to keep notes, and it needs a second
   tool surface to hide the `subject` argument.
