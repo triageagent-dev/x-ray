@@ -41,6 +41,7 @@ import (
 	"github.com/triageagent-dev/x-ray/v2/internal/version"
 	"github.com/triageagent-dev/x-ray/v2/internal/webui"
 	"github.com/triageagent-dev/x-ray/v2/internal/xray"
+	"github.com/triageagent-dev/x-ray/v2/pkg/leaderlease"
 	"github.com/triageagent-dev/x-ray/v2/pkg/memstore/index"
 )
 
@@ -131,6 +132,8 @@ func main() {
 		mcpStaticClientRedirects  string
 		episodicTTL               time.Duration
 		retentionSweepInterval    time.Duration
+		leaderElect               bool
+		leaderLeaseName           string
 		trustedProxyHops          int
 	)
 
@@ -199,6 +202,8 @@ func main() {
 	flag.DurationVar(&mcpTokenTTL, "mcp-token-ttl", 15*time.Minute, "Lifetime of issued MCP access tokens")
 	flag.StringVar(&mcpStaticClientID, "mcp-static-client-id", "", "Client ID of a pre-registered public MCP client (one that posts the code to its own https callback), with --mcp-oauth")
 	flag.StringVar(&mcpStaticClientRedirects, "mcp-static-client-redirect-uris", "", "Comma-separated redirect URIs of --mcp-static-client-id, matched exactly")
+	flag.BoolVar(&leaderElect, "leader-elect", false, "Elect one replica, with a Kubernetes Lease, to do the work that must run once: the sweeps that delete expired memory and the cell writes a reconcile makes back. Every replica serves requests either way. Set it when running more than one replica (needs the leases permission, ADR-068); with one replica it changes nothing")
+	flag.StringVar(&leaderLeaseName, "leader-lease-name", leaderlease.DefaultLeaseName, "Name of the Lease --leader-elect campaigns for, in --namespace")
 	flag.DurationVar(&episodicTTL, "episodic-ttl", 7*24*time.Hour, "Max age of an episodic session memory before it is forgotten — dropped from get_recent_memory and deleted by the reaper (0 = never forget). See ADR-020")
 	flag.DurationVar(&retentionSweepInterval, "retention-sweep-interval", time.Hour, "How often the general retention sweep runs, hard-deleting memory items past their StaleAfter deadline (0 = disabled). Durable/config kinds (system_configuration, system_identity, policy, mental_map/map-carrying cells) and episodic memories (owned by --episodic-ttl instead) are exempt regardless of StaleAfter; an item with no StaleAfter set never expires.")
 	flag.IntVar(&trustedProxyHops, "trusted-proxy-hops", 0, "Number of trusted reverse proxies in front of the server (e.g. 1 for a single ingress/LB that appends the client IP). Controls how X-Forwarded-For is read for rate-limit keying: only this many entries from the right are trusted; 0 (default) ignores XFF and keys on the TCP peer address, which cannot be spoofed.")
@@ -394,6 +399,29 @@ func main() {
 		} else {
 			syncer := xray.NewCellSyncer(mgr.GetClient(), memory, logger)
 			syncer.SetRegistryPullSecret(registryPullSecret)
+			if leaderElect {
+				elector := leaderlease.New(leaderlease.Config{
+					RestConfig: k8sCfg,
+					Namespace:  namespace,
+					Name:       leaderLeaseName,
+					Logger:     logger,
+				})
+				// A replica that takes the lease writes back what the one before it
+				// left undone (a cell without a stored vector), so it re-runs the
+				// startup backfill, which skipped its writes while it was a follower.
+				elector.SetCallbacks(func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+					defer cancel()
+					if err := syncer.SeedAll(ctx, namespace); err != nil {
+						logger.Warn().Err(err).Msg("MemoryCell backfill on taking the lease failed")
+					}
+				}, nil)
+				if err := mgr.Add(elector); err != nil {
+					logger.Fatal().Err(err).Msg("leader election: add to manager failed")
+				}
+				syncer.SetLeader(elector.IsLeader)
+				logger.Info().Str("lease", leaderLeaseName).Msg("leader election on — one replica runs the sweeps and cell write-backs")
+			}
 			cellSyncer = syncer
 
 			// Let graph-carrying MemoryCells (Data["graph"], or Data["graphRef"] — a

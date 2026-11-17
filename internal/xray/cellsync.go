@@ -65,6 +65,14 @@ type CellSyncer struct {
 	// the name) can be applied to the indexes; guarded by idsMu.
 	idsMu sync.Mutex
 	ids   map[string]string
+
+	// leader says whether this replica does the work that must run once: the
+	// writes a reconcile makes back to a cell it only reads (owner migration,
+	// stored embeddings, status), and the sweeps that delete. Nil means this is
+	// the only replica, so always true. Every replica still mirrors every cell
+	// into its own store and index; followers only skip the cluster writes the
+	// leader makes (ADR-068).
+	leader func() bool
 }
 
 func NewCellSyncer(c client.Client, memory *MemoryStore, logger zerolog.Logger) *CellSyncer {
@@ -79,6 +87,14 @@ func NewCellSyncer(c client.Client, memory *MemoryStore, logger zerolog.Logger) 
 // SetMapRegistrar wires the recall registry so graph-carrying cells (Data["graph"])
 // are loaded as searchable in-memory maps. No-op transport when nil.
 func (s *CellSyncer) SetMapRegistrar(r MapRegistrar) { s.mapReg = r }
+
+// SetLeader gates the syncer's own cluster writes and sweeps on is, which
+// reports whether this replica holds the lease (pkg/leaderlease). A nil is, the
+// default, makes this replica always the leader.
+func (s *CellSyncer) SetLeader(is func() bool) { s.leader = is }
+
+// isLeader reports whether this replica does the work that must run once.
+func (s *CellSyncer) isLeader() bool { return s.leader == nil || s.leader() }
 
 // SetRegistryPullSecret names the Secret whose registry credentials are used to
 // pull graphRef artifacts.
@@ -234,7 +250,7 @@ func (s *CellSyncer) syncCellDecision(ctx context.Context, cell *mcell.MemoryCel
 
 	// A private cell written with its owner in Subject moves to the user: tag, with
 	// Subject as this instance's identity. Done once, written back, idempotent.
-	if cellsync.MigratePrivateOwner(cell, s.memory.instance) {
+	if cellsync.MigratePrivateOwner(cell, s.memory.instance) && s.isLeader() {
 		if err := s.Update(ctx, cell); err != nil && !apierrors.IsConflict(err) {
 			s.logger.Warn().Err(err).Str("cell", cell.Name).Msg("private owner migration failed")
 		}
@@ -242,7 +258,7 @@ func (s *CellSyncer) syncCellDecision(ctx context.Context, cell *mcell.MemoryCel
 
 	// system_configuration is never indexed and not loaded into the store.
 	if cell.Spec.Kind == "system_configuration" {
-		if cell.Spec.Embedding != "" {
+		if cell.Spec.Embedding != "" && s.isLeader() {
 			cell.Spec.Embedding = ""
 			delete(cell.Annotations, index.FingerprintAnnotation)
 			if err := s.Update(ctx, cell); err != nil && !apierrors.IsConflict(err) {
@@ -256,6 +272,9 @@ func (s *CellSyncer) syncCellDecision(ctx context.Context, cell *mcell.MemoryCel
 	if d.Delete {
 		// Past its deadline: the cell, the item and its vector all go.
 		s.memory.ForgetCell(cell.Spec.ID)
+		if !s.isLeader() {
+			return d, nil // the leader deletes the cell; its delete event reaches this replica
+		}
 		if err := s.Delete(ctx, cell); err != nil && !apierrors.IsNotFound(err) {
 			return d, fmt.Errorf("delete expired cell: %w", err)
 		}
@@ -307,6 +326,11 @@ func (s *CellSyncer) syncCellDecision(ctx context.Context, cell *mcell.MemoryCel
 		return d, s.markIndexed(ctx, cell)
 	}
 
+	if !s.isLeader() {
+		// The vector is in this replica's index; the leader writes it back to the
+		// cell, and the update event brings the stored one here.
+		return d, nil
+	}
 	cell.Spec.Embedding = embedded
 	if cell.Annotations == nil {
 		cell.Annotations = map[string]string{}
@@ -474,6 +498,9 @@ func (s *CellSyncer) removeMapCell(cell *mcell.MemoryCell) {
 }
 
 func (s *CellSyncer) markIndexed(ctx context.Context, cell *mcell.MemoryCell) error {
+	if !s.isLeader() {
+		return nil
+	}
 	if cell.Status.Indexed {
 		return nil
 	}
@@ -722,7 +749,9 @@ func (s *CellSyncer) StartRetentionSweep(ctx context.Context, namespace string, 
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				s.sweepExpired(ctx, namespace)
+				if s.isLeader() {
+					s.sweepExpired(ctx, namespace)
+				}
 			}
 		}
 	}()

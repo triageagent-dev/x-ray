@@ -1282,7 +1282,10 @@ func (s *MemoryStore) StartEpisodicReaper(ctx context.Context, syncer *CellSynce
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				s.reapExpiredEpisodic(ctx, syncer)
+				// One replica reaps: the others see the cells go and forget them.
+				if syncer == nil || syncer.isLeader() {
+					s.reapExpiredEpisodic(ctx, syncer)
+				}
 			}
 		}
 	}()

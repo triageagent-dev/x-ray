@@ -9,6 +9,9 @@ voice.contextTargetTokens), each appending one flag.
 {{- if .Values.dev }}
 - --dev
 {{- end }}
+{{- if or .Values.leaderElect (gt (int .Values.replicaCount) 1) }}
+- --leader-elect
+{{- end }}
 {{- if .Values.voice.sessionResumption }}
 - --voice-session-resumption
 {{- end }}
@@ -24,6 +27,11 @@ voice.contextTargetTokens), each appending one flag.
 xray container env, generated from values.
 */}}
 {{- define "xray.containerEnv" -}}
+# The Lease identity of --leader-elect: a pod's own name.
+- name: POD_NAME
+  valueFrom:
+    fieldRef:
+      fieldPath: metadata.name
 - name: POD_NAMESPACE
   valueFrom:
     fieldRef:

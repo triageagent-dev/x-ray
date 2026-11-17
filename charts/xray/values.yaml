@@ -1,5 +1,10 @@
 replicaCount: 1
 
+# Elect one replica, with a Kubernetes Lease, for the work that must run once
+# (sweeps that delete expired memory, cell write-backs; ADR-068). On by itself
+# when replicaCount is above 1; set true to elect with a single replica.
+leaderElect: false
+
 # GKE Application CR (GKE-specific, off by default)
 application:
   create: false
