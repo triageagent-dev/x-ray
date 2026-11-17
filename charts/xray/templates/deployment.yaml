@@ -30,6 +30,12 @@ spec:
       # delivered in-band via MemoryCells (Data["graph"] → CellSyncer.AddSnapshotBytes),
       # so no /snapshots mount is needed. The server still builds the map registry
       # from --mental-maps-dir (empty dir is fine) and populates it from cells.
+      {{- if include "xray.mesh" . }}
+      volumes:
+        - name: mesh-tls
+          secret:
+            secretName: {{ .Release.Name }}-mesh-tls
+      {{- end }}
       containers:
         - name: xray
           image: {{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}
@@ -41,6 +47,12 @@ spec:
           ports:
             {{- include "xray.containerPorts" . | nindent 12 }}
           # volumeMounts for OCI map image-volumes removed — see note above.
+          {{- if include "xray.mesh" . }}
+          volumeMounts:
+            - name: mesh-tls
+              mountPath: /etc/xray/mesh-tls
+              readOnly: true
+          {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz

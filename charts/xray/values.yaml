@@ -5,6 +5,14 @@ replicaCount: 1
 # when replicaCount is above 1; set true to elect with a single replica.
 leaderElect: false
 
+# The replica mesh (ADR-068): replicas share their counters, daily token spend,
+# logins, OAuth client registrations and authorization codes over mutual TLS, with
+# a self-signed certificate the chart generates. On by itself when replicaCount is
+# above 1; set enabled to run it with one replica.
+mesh:
+  enabled: false
+  port: 8085
+
 # GKE Application CR (GKE-specific, off by default)
 application:
   create: false

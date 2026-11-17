@@ -126,6 +126,11 @@ type sessionStore struct {
 	// onChange is called after every create/invalidate so the caller can flush the
 	// session set to CR status. Nil disables flushing (local dev without k8s).
 	onChange func()
+	// onPublish and onDrop tell the other replicas of a login and of a logout
+	// (ADR-068), so a request that lands on another pod finds the session at once
+	// instead of after the next flush. Nil when this replica runs alone.
+	onPublish func(row mcell.UserSession)
+	onDrop    func(tokenHMAC string)
 }
 
 type sessionEntry struct {
@@ -246,13 +251,54 @@ func (s *sessionStore) create(username, userID string) string {
 	}
 	token := hex.EncodeToString(b)
 	s.mu.Lock()
-	s.entries[token] = sessionEntry{username: username, userID: userID, expiresAt: time.Now().Add(24 * time.Hour)}
-	onChange := s.onChange
+	e := sessionEntry{username: username, userID: userID, expiresAt: time.Now().Add(24 * time.Hour)}
+	s.entries[token] = e
+	onChange, onPublish := s.onChange, s.onPublish
+	var row mcell.UserSession
+	if onPublish != nil && len(s.hmacKey) > 0 {
+		row = s.rowOf(s.tokenHMAC(token), e)
+	}
 	s.mu.Unlock()
 	if onChange != nil {
 		onChange()
 	}
+	if row.TokenHMAC != "" {
+		onPublish(row)
+	}
 	return token
+}
+
+// rowOf is the persistable, sealed form of a session: what is stored on the cell
+// and what is sent to the other replicas. The caller holds s.mu.
+func (s *sessionStore) rowOf(tokenHMAC string, e sessionEntry) mcell.UserSession {
+	return mcell.UserSession{
+		UserHash:    stableUserID(e.userID),
+		TokenHMAC:   tokenHMAC,
+		IdentityEnc: s.encryptIdentity(e.username, e.userID),
+		ExpiresAt:   e.expiresAt.UTC().Format(time.RFC3339),
+	}
+}
+
+// dropHMAC removes the session whose token has this HMAC, as another replica's
+// logout asks, and reports whether it held one.
+func (s *sessionStore) dropHMAC(h string) bool {
+	if h == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	found := false
+	if _, ok := s.restored[h]; ok {
+		delete(s.restored, h)
+		found = true
+	}
+	for token := range s.entries {
+		if s.tokenHMAC(token) == h {
+			delete(s.entries, token)
+			found = true
+		}
+	}
+	return found
 }
 
 // validate returns (username, userID, ok).
@@ -288,16 +334,20 @@ func (s *sessionStore) invalidate(token string) {
 	s.mu.Lock()
 	_, existed := s.entries[token]
 	delete(s.entries, token)
-	if h := s.tokenHMAC(token); h != "" {
+	h := s.tokenHMAC(token)
+	if h != "" {
 		if _, ok := s.restored[h]; ok {
 			existed = true
 			delete(s.restored, h)
 		}
 	}
-	onChange := s.onChange
+	onChange, onDrop := s.onChange, s.onDrop
 	s.mu.Unlock()
 	if existed && onChange != nil {
 		onChange()
+	}
+	if existed && h != "" && onDrop != nil {
+		onDrop(h)
 	}
 }
 

@@ -65,8 +65,9 @@ const (
 // pattern (and the same ordering lesson) as session persistence (ADR-047).
 type oauthClientStore struct {
 	mu       sync.Mutex
-	clients  map[string]oauthClient // client_id → registration
-	onChange func()                 // marks stats dirty so the debounced flusher persists; nil = no persistence
+	clients  map[string]oauthClient     // client_id → registration
+	onChange func()                     // marks stats dirty so the debounced flusher persists; nil = no persistence
+	onAdd    func(mcell.OAuthClientReg) // tells the other replicas of a registration (ADR-068); nil = runs alone
 }
 
 var oauthClients = &oauthClientStore{clients: make(map[string]oauthClient)}
@@ -95,10 +96,13 @@ func (s *oauthClientStore) add(clientID string, c oauthClient) {
 		delete(s.clients, oldestID)
 	}
 	s.clients[clientID] = c
-	onChange := s.onChange
+	onChange, onAdd := s.onChange, s.onAdd
 	s.mu.Unlock()
 	if onChange != nil {
 		onChange()
+	}
+	if onAdd != nil {
+		onAdd(mcell.OAuthClientReg{ClientID: clientID, RedirectURIs: append([]string(nil), c.redirectURIs...), IssuedAt: c.issuedAt.UTC().Format(time.RFC3339)})
 	}
 }
 
@@ -182,6 +186,12 @@ type mcpAuthorizer struct {
 	static map[string][]string
 	mu     sync.Mutex
 	codes  map[string]authCode
+	// shareCode hands a code just issued to the other replicas and returns when
+	// they have it, so the client's call to /token may land on any of them;
+	// dropCode tells them it was redeemed. Nil when this replica runs alone
+	// (ADR-068).
+	shareCode func(code string, c authCode)
+	dropCode  func(code string)
 	// DCR client registrations live in the package-level oauthClients store (not a
 	// field here) so they can be restored from CR status before this authorizer is
 	// even constructed — see oauthClientStore. ADR-049.
@@ -612,19 +622,7 @@ func (a *mcpAuthorizer) handleAuthorize(w http.ResponseWriter, r *http.Request) 
 	}
 
 	code := randB64(32)
-	a.mu.Lock()
-	// Bound the map: at cap, evict the oldest code before inserting.
-	if len(a.codes) >= maxAuthCodes {
-		var oldestK string
-		var oldest time.Time
-		for k, c := range a.codes {
-			if oldestK == "" || c.expiresAt.Before(oldest) {
-				oldestK, oldest = k, c.expiresAt
-			}
-		}
-		delete(a.codes, oldestK)
-	}
-	a.codes[code] = authCode{
+	issued := authCode{
 		challenge:   challenge,
 		clientID:    clientID,
 		redirectURI: redirectURI,
@@ -633,7 +631,10 @@ func (a *mcpAuthorizer) handleAuthorize(w http.ResponseWriter, r *http.Request) 
 		scopes:      a.grantedScopes(userHash, byGrant),
 		expiresAt:   time.Now().Add(2 * time.Minute),
 	}
-	a.mu.Unlock()
+	a.putCode(code, issued)
+	if a.shareCode != nil {
+		a.shareCode(code, issued)
+	}
 
 	loc, err := url.Parse(redirectURI)
 	if err != nil {
@@ -650,6 +651,31 @@ func (a *mcpAuthorizer) handleAuthorize(w http.ResponseWriter, r *http.Request) 
 	// `sub` is the provider OID (e.g. azure:<oid>) and must not land in logs.
 	a.logger.Info().Str("user", username).Str("userHash", userHash).Str("client_id", clientID).Str("redirect", loc.Host).Msg("mcp authorize: code issued")
 	http.Redirect(w, r, loc.String(), http.StatusFound)
+}
+
+// putCode stores a code. The map is bounded: at the cap the oldest code goes
+// before the new one is inserted.
+func (a *mcpAuthorizer) putCode(code string, c authCode) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.codes) >= maxAuthCodes {
+		var oldestK string
+		var oldest time.Time
+		for k, ex := range a.codes {
+			if oldestK == "" || ex.expiresAt.Before(oldest) {
+				oldestK, oldest = k, ex.expiresAt
+			}
+		}
+		delete(a.codes, oldestK)
+	}
+	a.codes[code] = c
+}
+
+// forgetCode drops a code another replica redeemed.
+func (a *mcpAuthorizer) forgetCode(code string) {
+	a.mu.Lock()
+	delete(a.codes, code)
+	a.mu.Unlock()
 }
 
 // handleToken implements POST /token (grant_type=authorization_code + PKCE verify).
@@ -675,6 +701,9 @@ func (a *mcpAuthorizer) handleToken(w http.ResponseWriter, r *http.Request) {
 		delete(a.codes, code) // single-use
 	}
 	a.mu.Unlock()
+	if ok && a.dropCode != nil {
+		a.dropCode(code)
+	}
 
 	if !ok || time.Now().After(ac.expiresAt) {
 		tokenError(w, "invalid_grant", "code invalid or expired")

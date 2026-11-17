@@ -1,6 +1,6 @@
 # ADR-068: Running More Than One Replica
 
-**Status:** Phase 1 implemented; phases 2 and 3 not built
+**Status:** Phases 1 and 2 implemented; phase 3 not built
 
 ## Context
 
@@ -54,15 +54,34 @@ copy for these has the same behaviour pinned.
    that serves them, as before. The stats flush is **not** gated: it also carries the live sessions and
    registered OAuth clients, which another replica restores from the cell, so a flush only the leader made
    would lose a login made on a follower. It moves with the counters in phase 2.
-2. A small mesh (peers found through a headless Service, mutual TLS) that carries one ledger frame,
-   `meshsync` for the per-user daily token spend so a cap holds across replicas, and a frame for the
-   MCP authorization codes.
+2. **Implemented.** A mesh, `pkg/mesh`: each replica finds its peers through a headless Service, dials every
+   one over mutual TLS (a self-signed certificate the chart generates and keeps across upgrades, named for the
+   mesh because peers are dialed by pod IP), and sends small typed frames. It is best effort: a frame sent
+   while a peer is away is lost, so what travels is level state that is resent on connect and every 30 s, or can
+   be read back from the cell. `--mesh-tls-dir` turns it on; the chart does so above one replica. Over it go:
+   - **Counters and each person's daily token spend**, with `pkg/meshsync`. A replica counts its own work and
+     sends its running totals; a receiver adds only what a total grew by, so a resend adds nothing, a lost
+     frame is made good by the next, and a restarted replica starts afresh. A token charge is sent at once and
+     a counter within 5 s, so a daily cap is checked against the sum for the whole service. What was applied
+     from each sender is saved on the cell (`spec.data["mesh-totals"]`) next to the totals, so a restart knows
+     what the persisted totals already hold and counts nothing twice.
+   - **Logins and OAuth client registrations.** A login on one replica reaches the others as the same sealed row
+     the cell holds, a logout as a drop, so the next request may land on any replica without waiting for a flush.
+   - **MCP authorization codes.** `/authorize` answers once the peers acknowledge the code, because the client's
+     next call is `/token` and the Service may route it to any replica; a redeemed code is dropped everywhere.
+   With the mesh carrying everything the stats flush held, the flush is leader-only: the leader writes the
+   counters, the sessions and the clients, never less than the cell already has, and a replica that takes the
+   lease marks the stats dirty so it writes at once. The persisted counters are taken back once at start; with a
+   mesh a later echo of the cell would count what the peers sent twice.
 3. A `policy` cell for the limits (daily caps, retention), watched live like the voice
    configuration.
 
 ## Consequences
 
-- A single replica behaves as before: with one pod the lease is won at once and nothing else changes.
+- A single replica behaves as before: with one pod the lease is won at once, the mesh is off, and nothing else changes.
+- Without the mesh (no `--mesh-tls-dir`) above one replica, each replica still counts alone, as before.
+- A rolling update between a build with the mesh and one without leaves each side counting its own work until
+  the roll finishes; frames carry a protocol version and a frame of another version is dropped.
 - Followers keep serving search, voice and MCP; only periodic work waits for the leader, and a failover is
   bounded by the lease timings (15 s duration, 10 s renew, 2 s retry).
 - The sibling service can drop its internal copies after a release of X-Ray that contains the packages.
