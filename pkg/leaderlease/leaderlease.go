@@ -66,6 +66,8 @@ type Elector struct {
 	leader    atomic.Bool
 	onStarted func()
 	onStopped func()
+	// coord replaces the client built from RestConfig, for tests.
+	coord coordinationv1client.CoordinationV1Interface
 }
 
 // New builds an Elector. It does not contact the API server until Start runs.
@@ -140,10 +142,22 @@ func (e *Elector) Start(ctx context.Context) error {
 		<-ctx.Done()
 		return nil
 	}
-	coordClient, err := coordinationv1client.NewForConfig(e.cfg.RestConfig)
-	if err != nil {
-		return fmt.Errorf("leaderlease: build coordination client: %w", err)
+	coordClient := e.coord
+	if coordClient == nil {
+		c, err := coordinationv1client.NewForConfig(e.cfg.RestConfig)
+		if err != nil {
+			return fmt.Errorf("leaderlease: build coordination client: %w", err)
+		}
+		coordClient = c
 	}
+	// A replica that is stopping starts no more leader-only work. Work it already
+	// started (a flush, a backfill) may still run for the seconds until the process
+	// exits, next to the new leader's: a backfill writes the same vectors, and the
+	// stats never go below what the cell holds.
+	go func() {
+		<-ctx.Done()
+		e.leader.Store(false)
+	}()
 	lock := &resourcelock.LeaseLock{
 		LeaseMeta: metav1.ObjectMeta{
 			Name:      e.name(),
@@ -161,6 +175,10 @@ func (e *Elector) Start(ctx context.Context) error {
 			LeaseDuration: LeaseDuration,
 			RenewDeadline: RenewDeadline,
 			RetryPeriod:   RetryPeriod,
+			// Hand the lease back when ctx ends (the pod is stopping), so another
+			// replica takes over within a RetryPeriod instead of waiting out
+			// LeaseDuration.
+			ReleaseOnCancel: true,
 			Callbacks: leaderelection.LeaderCallbacks{
 				OnStartedLeading: func(context.Context) {
 					e.leader.Store(true)

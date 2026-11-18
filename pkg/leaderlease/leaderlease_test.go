@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
 )
 
@@ -151,5 +152,44 @@ func TestElector_LeaseName(t *testing.T) {
 	}
 	if n := (&Elector{}).name(); n != DefaultLeaseName {
 		t.Errorf("name of an Elector built without New = %q, want %q", n, DefaultLeaseName)
+	}
+}
+
+// TestElector_AStoppingLeaderHandsTheLeaseOver drives two electors against a fake
+// API server: when the leader's context ends (the pod is stopping) it releases the
+// Lease, so the other replica leads within a few retry periods instead of waiting
+// out LeaseDuration.
+func TestElector_AStoppingLeaderHandsTheLeaseOver(t *testing.T) {
+	coord := fake.NewClientset().CoordinationV1()
+	mk := func(id string) *Elector {
+		t.Setenv("POD_NAME", id)
+		e := New(Config{RestConfig: &rest.Config{}, Namespace: "xray", Logger: zerolog.Nop()})
+		e.coord = coord
+		return e
+	}
+	a, b := mk("xray-a"), mk("xray-b")
+
+	ctxA, stopA := context.WithCancel(context.Background())
+	defer stopA()
+	go func() { _ = a.Start(ctxA) }()
+	waitFor(t, 5*time.Second, a.IsLeader, "a never took the lease")
+
+	ctxB, stopB := context.WithCancel(context.Background())
+	defer stopB()
+	go func() { _ = b.Start(ctxB) }()
+
+	stopA()
+	waitFor(t, time.Second, func() bool { return !a.IsLeader() }, "a still acts as leader after it was stopped")
+	waitFor(t, LeaseDuration-5*time.Second, b.IsLeader, "b did not take over before the lease would have expired by itself")
+}
+
+func waitFor(t *testing.T, within time.Duration, cond func() bool, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal(msg)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

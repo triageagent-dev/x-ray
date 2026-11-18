@@ -384,6 +384,7 @@ func main() {
 	// k8s / controller-runtime setup — gracefully disabled when no kubeconfig available.
 	k8sCfg, cfgErr := ctrl.GetConfig()
 	var meshInst *mesh.Mesh
+	var mgrStopped chan struct{} // closed once the manager has stopped; nil without k8s
 	if cfgErr != nil {
 		logger.Warn().Err(cfgErr).Msg("no k8s config — Secret watch and MemoryCell sync disabled")
 	} else {
@@ -561,7 +562,9 @@ func main() {
 
 			// Start the manager (cache + reconciler) in the background.
 			mgrCtx, mgrCancel := context.WithCancel(context.Background())
+			mgrStopped = make(chan struct{})
 			go func() {
+				defer close(mgrStopped)
 				if err := mgr.Start(mgrCtx); err != nil {
 					logger.Error().Err(err).Msg("controller-runtime manager exited")
 				}
@@ -784,6 +787,15 @@ func main() {
 	log.Info().Str("addr", httpAddr).Msg("xray server ready")
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal().Err(err).Msg("server failed")
+	}
+	// Give the manager a moment to stop before the process exits: a leader hands
+	// its Lease back as it stops (one API call), so another replica takes over at
+	// once. Bounded well inside the pod's termination grace period.
+	if mgrStopped != nil {
+		select {
+		case <-mgrStopped:
+		case <-time.After(5 * time.Second):
+		}
 	}
 }
 

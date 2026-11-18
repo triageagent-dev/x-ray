@@ -83,7 +83,10 @@ copy for these has the same behaviour pinned.
 - A rolling update between a build with the mesh and one without leaves each side counting its own work until
   the roll finishes; frames carry a protocol version and a frame of another version is dropped.
 - Followers keep serving search, voice and MCP; only periodic work waits for the leader, and a failover is
-  bounded by the lease timings (15 s duration, 10 s renew, 2 s retry).
+  bounded by the lease timings (15 s duration, 10 s renew, 2 s retry). A leader that is stopped (a rolling update,
+  a deleted pod) hands the Lease back as it stops, so another replica leads within a retry; only a leader that
+  dies without stopping is waited out. Leader work the stopping replica already started may still run for the few
+  seconds until it exits: a backfill writes the same vectors, and the stats never go below what the cell holds.
 - The sibling service can drop its internal copies after a release of X-Ray that contains the packages.
   Its import path changes and its lease name is passed as `Config.Name`, so the Lease object and the
   mesh frames are the ones it has today.
