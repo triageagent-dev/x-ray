@@ -12,6 +12,7 @@ import (
 	"encoding/pem"
 	"math/big"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -237,4 +238,49 @@ func TestMesh_DiscoverSkipsItsOwnAddress(t *testing.T) {
 		want = []string{"static:1", "127.0.0.1:8085", "10.1.2.3:8085"}
 	}
 	assert.Equal(t, want, m.discover())
+}
+
+// syncBuffer is a log sink the mesh's goroutines may write to while the test reads.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  []byte
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.b = append(s.b, p...)
+	return len(p), nil
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return string(s.b)
+}
+
+func TestMesh_APeerThatGoesAwayIsLogged(t *testing.T) {
+	a, b := pair(t, newTestCA(t))
+	logs := &syncBuffer{}
+	a.cfg.Logger = zerolog.New(logs)
+	ctxA, cancelA := context.WithCancel(context.Background())
+	t.Cleanup(cancelA)
+	ctxB, cancelB := context.WithCancel(context.Background())
+	t.Cleanup(cancelB)
+	go func() { _ = a.Start(ctxA) }()
+	go func() { _ = b.Start(ctxB) }()
+	require.Eventually(t, func() bool { return a.Connected() > 0 && b.Connected() > 0 }, 5*time.Second, 10*time.Millisecond)
+	assert.NotContains(t, logs.String(), "peer disconnected")
+
+	// The network drops a's connection to b (a pod gone, a policy that cuts the port).
+	a.pmu.Lock()
+	for _, pc := range a.peers {
+		if pc != nil {
+			_ = pc.conn.Close()
+		}
+	}
+	a.pmu.Unlock()
+
+	require.Eventually(t, func() bool { return strings.Contains(logs.String(), `"message":"mesh: peer disconnected"`) }, 5*time.Second, 10*time.Millisecond,
+		"a lost peer is logged, so a broken mesh can be seen")
 }

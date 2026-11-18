@@ -58,7 +58,8 @@ copy for these has the same behaviour pinned.
    one over mutual TLS (a self-signed certificate the chart generates and keeps across upgrades, named for the
    mesh because peers are dialed by pod IP), and sends small typed frames. It is best effort: a frame sent
    while a peer is away is lost, so what travels is level state that is resent on connect and every 30 s, or can
-   be read back from the cell. `--mesh-tls-dir` turns it on; the chart does so above one replica. Over it go:
+   be read back from the cell. `--mesh-tls-dir` turns it on; the chart does so above one replica. A replica
+   logs a peer it dials when the connection is made and when it is lost. Over it go:
    - **Counters and each person's daily token spend**, with `pkg/meshsync`. A replica counts its own work and
      sends its running totals; a receiver adds only what a total grew by, so a resend adds nothing, a lost
      frame is made good by the next, and a restarted replica starts afresh. A token charge is sent at once and

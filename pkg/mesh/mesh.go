@@ -473,6 +473,10 @@ func (m *Mesh) dial(ctx context.Context, addr string) {
 	}
 	m.read(pc)
 	pc.close()
+	// The pair to "peer connected": without it a mesh that broke stays silent.
+	if ctx.Err() == nil {
+		m.cfg.Logger.Warn().Str("addr", addr).Msg("mesh: peer disconnected")
+	}
 }
 
 var upgrader = websocket.Upgrader{ReadBufferSize: 64 << 10, WriteBufferSize: 64 << 10}
