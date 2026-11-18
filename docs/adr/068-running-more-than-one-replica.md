@@ -73,6 +73,29 @@ copy for these has the same behaviour pinned.
    counters, the sessions and the clients, never less than the cell already has, and a replica that takes the
    lease marks the stats dirty so it writes at once. The persisted counters are taken back once at start; with a
    mesh a later echo of the cell would count what the peers sent twice.
+**Authorization codes are single-use across replicas.** A code is redeemed once, but the same code can reach two
+replicas at once (a client that retries, or two requests sent on purpose), each holding a copy. The replica that
+issued the code decides: a replica that holds a copy asks the issuer, over the mesh, whether it is still
+unredeemed, and the issuer answers under its lock, so of any number of requests one gets it. If the issuer cannot
+be asked (it is gone, or not connected) the answer is 503 `temporarily_unavailable` and no token; the client
+authorizes again.
+
+**Who a peer is.** Peers authenticate with mutual TLS: a connection needs a certificate the mesh CA signed, in
+both directions, over TLS 1.3. The chart generates one certificate for all pods, so it proves that a caller holds
+the mesh Secret, not which pod it is. Three things narrow it:
+- A connection is accepted only from an address the headless Service resolves to, so holding the Secret is not
+  enough; the caller must be a pod behind the Service.
+- An authorization code carries the subject and scopes of the token it becomes, so its frame carries a MAC under
+  a key derived from the OAuth signing secret every replica shares. A peer without that secret cannot plant a code.
+  Sessions are sealed under a key from the same secret, so a forged login does not decrypt.
+- The Secret is in the release namespace, where the service account can already read the OAuth secrets, so run
+  X-Ray in a namespace of its own (as the chart's RBAC note says) and limit the mesh port to the pods of the
+  release with a NetworkPolicy.
+
+What a peer is trusted for, once connected: the counters and token spend it reports, and the name it gives itself.
+A caller that holds the Secret and is behind the Service can overstate a person's spend. It cannot mint a token or
+a login.
+
 3. A `policy` cell for the limits (daily caps, retention), watched live like the voice
    configuration.
 

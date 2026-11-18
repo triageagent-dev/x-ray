@@ -238,3 +238,65 @@ func TestMesh_DiscoverSkipsItsOwnAddress(t *testing.T) {
 	}
 	assert.Equal(t, want, m.discover())
 }
+
+func TestMesh_RequestIsAnsweredByTheReplicaAsked(t *testing.T) {
+	a, b := pair(t, newTestCA(t))
+	b.HandleRequest("claim", func(origin string, data json.RawMessage) any {
+		return map[string]string{"from": origin, "got": string(data)}
+	})
+	run(t, a, b)
+	// The dialer learns the name of the replica it dialed from its hello.
+	require.Eventually(t, func() bool {
+		var out map[string]string
+		return a.Request(context.Background(), "b", "claim", "x", &out) == nil
+	}, 3*time.Second, 20*time.Millisecond)
+
+	var out map[string]string
+	require.NoError(t, a.Request(context.Background(), "b", "claim", "x", &out))
+	assert.Equal(t, map[string]string{"from": "a", "got": `"x"`}, out)
+}
+
+func TestMesh_RequestToAReplicaNotConnectedFails(t *testing.T) {
+	a, b := pair(t, newTestCA(t))
+	run(t, a, b)
+	assert.ErrorIs(t, a.Request(context.Background(), "nobody", "claim", 1, nil), ErrNoPeer)
+}
+
+func TestMesh_RequestStopsWaitingWhenTheContextEnds(t *testing.T) {
+	a, b := pair(t, newTestCA(t))
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	b.HandleRequest("slow", func(string, json.RawMessage) any { <-release; return 1 })
+	run(t, a, b)
+	require.Eventually(t, func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		err := a.Request(ctx, "b", "slow", 1, nil)
+		return err != nil && err != ErrNoPeer
+	}, 3*time.Second, 20*time.Millisecond)
+}
+
+// With a headless Service configured, holding the mesh certificate is not enough:
+// the caller must be a pod the Service resolves to.
+func TestMesh_RefusesACallerTheServiceDoesNotResolveTo(t *testing.T) {
+	a, b := pair(t, newTestCA(t))
+	a.cfg.ServiceDNS = "mesh.ns.svc"
+	a.cfg.LookupHost = func(string) ([]string, error) { return []string{"10.9.9.9"}, nil } // not b's address
+	run2 := func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		go func() { _ = a.Start(ctx) }()
+		go func() { _ = b.Start(ctx) }()
+	}
+	run2()
+	time.Sleep(500 * time.Millisecond)
+	assert.Zero(t, b.Connected(), "b holds a valid certificate, but a does not know its address")
+}
+
+func TestMesh_AcceptsACallerTheServiceResolvesTo(t *testing.T) {
+	a, b := pair(t, newTestCA(t))
+	a.cfg.ServiceDNS = "mesh.ns.svc"
+	a.cfg.LookupHost = func(string) ([]string, error) { return []string{"127.0.0.1"}, nil }
+	run(t, a, b)
+	assert.NotZero(t, b.Connected())
+}

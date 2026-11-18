@@ -194,6 +194,9 @@ type mcpAuthorizer struct {
 	// (ADR-068).
 	shareCode func(code string, c authCode)
 	dropCode  func(code string)
+	// claimCode asks the replica that issued a code whether it is still
+	// unredeemed, and marks it redeemed there. Nil when this replica runs alone.
+	claimCode func(code, owner string) (granted bool, err error)
 	// DCR client registrations live in the package-level oauthClients store (not a
 	// field here) so they can be restored from CR status before this authorizer is
 	// even constructed — see oauthClientStore. ADR-049.
@@ -213,6 +216,10 @@ type authCode struct {
 	sub         string
 	scopes      []string
 	expiresAt   time.Time
+	// owner is the replica that issued the code, "" when this replica did. A code
+	// is single-use across replicas because one replica decides: a copy held here
+	// is redeemed only if the owner says it is still unredeemed (ADR-068).
+	owner string
 }
 
 // oauthClient is a dynamically registered public client (RFC 7591). Clients are
@@ -698,6 +705,20 @@ func (a *mcpAuthorizer) putCode(code string, c authCode) {
 	a.codes[code] = c
 }
 
+// claim redeems a code this replica issued, for another replica that holds a copy:
+// true for the one request that finds it unredeemed. Under the lock, so of two
+// requests at once, on this replica or others, one gets it.
+func (a *mcpAuthorizer) claim(code string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	c, ok := a.codes[code]
+	if !ok || c.owner != "" || time.Now().After(c.expiresAt) {
+		return false
+	}
+	delete(a.codes, code)
+	return true
+}
+
 // forgetCode drops a code another replica redeemed.
 func (a *mcpAuthorizer) forgetCode(code string) {
 	a.mu.Lock()
@@ -728,6 +749,20 @@ func (a *mcpAuthorizer) handleToken(w http.ResponseWriter, r *http.Request) {
 		delete(a.codes, code) // single-use
 	}
 	a.mu.Unlock()
+	if ok && ac.owner != "" {
+		// A copy of a code another replica issued. Two requests for it may be in
+		// flight on different replicas at once, each holding a copy, so the
+		// replica that issued it decides which one redeems it.
+		if a.claimCode == nil {
+			ok = false
+		} else if granted, err := a.claimCode(code, ac.owner); err != nil {
+			a.logger.Warn().Err(err).Str("owner", ac.owner).Msg("mesh: the replica that issued an authorization code could not be asked")
+			tokenErrorStatus(w, http.StatusServiceUnavailable, "temporarily_unavailable", "the code could not be confirmed; retry")
+			return
+		} else if !granted {
+			ok = false
+		}
+	}
 	if ok && a.dropCode != nil {
 		a.dropCode(code)
 	}
@@ -877,8 +912,12 @@ func writeJSON(w http.ResponseWriter, v any) {
 }
 
 func tokenError(w http.ResponseWriter, code, desc string) {
+	tokenErrorStatus(w, http.StatusBadRequest, code, desc)
+}
+
+func tokenErrorStatus(w http.ResponseWriter, status int, code, desc string) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusBadRequest)
+	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
 		"error":             code,
 		"error_description": desc,

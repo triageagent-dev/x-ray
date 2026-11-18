@@ -49,6 +49,7 @@ const (
 	path        = "/mesh"
 	kindHello   = "hello"
 	kindAck     = "ack"
+	kindReply   = "reply"
 	maxFrame    = 4 << 20
 	sendBuffer  = 256
 	writeWait   = 5 * time.Second
@@ -133,6 +134,13 @@ type Config struct {
 // Handler receives a frame's payload and the replica that sent it.
 type Handler func(origin string, data json.RawMessage)
 
+// RequestHandler answers a request: its return value is sent back as the reply.
+type RequestHandler func(origin string, data json.RawMessage) any
+
+// ErrNoPeer is returned by Request when this replica has no connection to the
+// replica asked.
+var ErrNoPeer = errors.New("mesh: no connection to that replica")
+
 // Mesh is one replica's side of the mesh. Safe for concurrent use.
 type Mesh struct {
 	cfg Config
@@ -144,8 +152,18 @@ type Mesh struct {
 	pmu   sync.Mutex
 	peers map[string]*peerConn // dialed addr → connection, nil while dialing
 
-	acks   sync.Map // id → chan struct{}
-	nextID atomic.Uint64
+	// inService is the set of pod addresses the headless Service last resolved to.
+	// With a Service configured, a connection is accepted only from one of them:
+	// holding the mesh certificate is not enough, the caller must also be a pod
+	// behind the Service.
+	inService atomic.Pointer[map[string]struct{}]
+
+	rmu      sync.RWMutex
+	requests map[string]RequestHandler
+
+	acks    sync.Map // id → chan struct{}
+	replies sync.Map // id → chan json.RawMessage
+	nextID  atomic.Uint64
 
 	// Dropped counts frames not sent because a peer's buffer was full.
 	Dropped atomic.Int64
@@ -159,7 +177,7 @@ func New(cfg Config) *Mesh {
 	if cfg.LookupHost == nil {
 		cfg.LookupHost = net.LookupHost
 	}
-	return &Mesh{cfg: cfg, handlers: make(map[string]Handler), peers: make(map[string]*peerConn)}
+	return &Mesh{cfg: cfg, handlers: make(map[string]Handler), requests: make(map[string]RequestHandler), peers: make(map[string]*peerConn)}
 }
 
 // Handle registers fn for frames of kind. Call before Start.
@@ -167,6 +185,53 @@ func (m *Mesh) Handle(kind string, fn Handler) {
 	m.hmu.Lock()
 	m.handlers[kind] = fn
 	m.hmu.Unlock()
+}
+
+// HandleRequest registers fn to answer requests of kind (see Request). Call before
+// Start.
+func (m *Mesh) HandleRequest(kind string, fn RequestHandler) {
+	m.rmu.Lock()
+	m.requests[kind] = fn
+	m.rmu.Unlock()
+}
+
+// Request asks one replica, by name, and waits for its answer, which is decoded
+// into reply (nil to ignore it). Use it when exactly one replica must decide:
+// the same question broadcast to all would be answered by each on its own. It
+// fails with ErrNoPeer when this replica is not connected to the one asked, and
+// with ctx's error when no answer comes.
+func (m *Mesh) Request(ctx context.Context, origin, kind string, v, reply any) error {
+	var pc *peerConn
+	for _, c := range m.connected() {
+		if o, _ := c.origin.Load().(string); o == origin {
+			pc = c
+			break
+		}
+	}
+	if pc == nil {
+		return ErrNoPeer
+	}
+	id := m.nextID.Add(1)
+	f, ok := m.frame(kind, v, id)
+	if !ok {
+		return errors.New("mesh: request does not marshal")
+	}
+	ch := make(chan json.RawMessage, 1)
+	m.replies.Store(id, ch)
+	defer m.replies.Delete(id)
+	if !pc.enqueue(f) {
+		m.Dropped.Add(1)
+		return errors.New("mesh: request not sent, the peer's buffer is full")
+	}
+	select {
+	case raw := <-ch:
+		if reply == nil {
+			return nil
+		}
+		return json.Unmarshal(raw, reply)
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // OnConnect registers fn, called each time this replica connects to a peer, with
@@ -317,6 +382,7 @@ func (m *Mesh) closeAll() {
 // ── peers ─────────────────────────────────────────────────────────────────────
 
 type peerConn struct {
+	origin atomic.Value // string: the replica at the other end, once it has said hello
 	conn   *websocket.Conn
 	out    chan Frame
 	done   chan struct{}
@@ -412,6 +478,11 @@ func (m *Mesh) discover() []string {
 		m.cfg.Logger.Debug().Err(err).Str("service", m.cfg.ServiceDNS).Msg("mesh: peer lookup failed")
 		return out
 	}
+	set := make(map[string]struct{}, len(ips))
+	for _, ip := range ips {
+		set[ip] = struct{}{}
+	}
+	m.inService.Store(&set)
 	own := ownAddresses()
 	for _, ip := range ips {
 		if _, self := own[ip]; self {
@@ -480,14 +551,38 @@ var upgrader = websocket.Upgrader{ReadBufferSize: 64 << 10, WriteBufferSize: 64 
 // accept serves a peer that dialed this replica. The TLS handshake has already
 // required a certificate the mesh CA signed.
 func (m *Mesh) accept(w http.ResponseWriter, r *http.Request) {
+	if m.cfg.ServiceDNS != "" && !m.fromService(r.RemoteAddr) {
+		m.cfg.Logger.Warn().Str("remote", r.RemoteAddr).Msg("mesh: refused a connection from an address the Service does not resolve to")
+		http.Error(w, "not a replica", http.StatusForbidden)
+		return
+	}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
 	}
 	pc := newPeerConn(conn)
 	go pc.writeLoop()
+	// Say who this is: the dialer sends to a replica by name (Request), and learns
+	// the name of the one it dialed from this.
+	pc.enqueue(Frame{V: ProtocolVersion, Kind: kindHello, Origin: m.cfg.Self})
 	m.read(pc)
 	pc.close()
+}
+
+// fromService reports whether remote (host:port) is a pod the Service resolved to
+// at its last lookup. A pod that has only just started may be missing from it; its
+// dial is refused and tried again at the next interval.
+func (m *Mesh) fromService(remote string) bool {
+	host, _, err := net.SplitHostPort(remote)
+	if err != nil {
+		return false
+	}
+	set := m.inService.Load()
+	if set == nil {
+		return false
+	}
+	_, ok := (*set)[host]
+	return ok
 }
 
 // read dispatches the connection's frames until it drops.
@@ -511,6 +606,14 @@ func (m *Mesh) read(pc *peerConn) {
 		}
 		switch f.Kind {
 		case kindHello:
+			pc.origin.Store(f.Origin)
+		case kindReply:
+			if ch, ok := m.replies.Load(f.ID); ok {
+				select {
+				case ch.(chan json.RawMessage) <- f.Data:
+				default:
+				}
+			}
 		case kindAck:
 			if ch, ok := m.acks.Load(f.ID); ok {
 				select {
@@ -519,6 +622,21 @@ func (m *Mesh) read(pc *peerConn) {
 				}
 			}
 		default:
+			m.rmu.RLock()
+			rh := m.requests[f.Kind]
+			m.rmu.RUnlock()
+			if rh != nil && f.ID != 0 {
+				// A request is answered by its handler, on its own goroutine so a slow
+				// answer does not hold up the connection's other frames.
+				go func(f Frame) {
+					out := Frame{V: ProtocolVersion, Kind: kindReply, Origin: m.cfg.Self, ID: f.ID}
+					if raw, err := json.Marshal(rh(f.Origin, f.Data)); err == nil {
+						out.Data = raw
+					}
+					pc.enqueue(out)
+				}(f)
+				continue
+			}
 			m.hmu.RLock()
 			h := m.handlers[f.Kind]
 			m.hmu.RUnlock()

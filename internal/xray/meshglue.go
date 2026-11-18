@@ -2,7 +2,12 @@ package xray
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -23,6 +28,7 @@ const (
 	frameClients     = "oauth_clients"
 	frameCode        = "auth_code"
 	frameCodeRedeem  = "auth_code_redeemed"
+	frameCodeClaim   = "auth_code_claim" // a request: the issuing replica decides who redeems a code
 	codeShareTimeout = time.Second
 )
 
@@ -40,6 +46,28 @@ type codeFrame struct {
 	Sub         string   `json:"sub"`
 	Scopes      []string `json:"scopes"`
 	ExpiresAt   int64    `json:"expiresAt"` // unix seconds
+	// MAC proves the frame came from a replica that holds the OAuth signing secret,
+	// not only the mesh certificate: a code carries the subject and scopes of the
+	// token it will be exchanged for, so a peer that could mint one could mint a
+	// token for anyone.
+	MAC string `json:"mac"`
+}
+
+// codeMACKey is derived from the signing key every replica shares (ADR-050), under
+// its own label so it is not a key anything else uses.
+func (a *mcpAuthorizer) codeMACKey() []byte {
+	h := hmac.New(sha256.New, a.key.Seed())
+	h.Write([]byte("xray-mesh-auth-code-v1"))
+	return h.Sum(nil)
+}
+
+func (a *mcpAuthorizer) codeMAC(f codeFrame) string {
+	h := hmac.New(sha256.New, a.codeMACKey())
+	for _, part := range []string{f.Code, f.Challenge, f.ClientID, f.RedirectURI, f.Resource, f.Sub, strings.Join(f.Scopes, " "), strconv.FormatInt(f.ExpiresAt, 10)} {
+		h.Write([]byte(part))
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // JoinMesh shares this replica's counters, token spend, logins and OAuth client
@@ -132,23 +160,50 @@ func (a *mcpAuthorizer) JoinMesh(mm *mesh.Mesh) {
 	a.shareCode = func(code string, c authCode) {
 		ctx, cancel := context.WithTimeout(context.Background(), codeShareTimeout)
 		defer cancel()
-		acked, sent := mm.BroadcastWait(ctx, frameCode, codeFrame{
+		f := codeFrame{
 			Code: code, Challenge: c.challenge, ClientID: c.clientID, RedirectURI: c.redirectURI,
 			Resource: c.resource, Sub: c.sub, Scopes: c.scopes, ExpiresAt: c.expiresAt.Unix(),
-		})
+		}
+		f.MAC = a.codeMAC(f)
+		acked, sent := mm.BroadcastWait(ctx, frameCode, f)
 		if acked < sent {
 			a.logger.Warn().Int("acked", acked).Int("peers", sent).Msg("mesh: an authorization code did not reach every peer; a /token call routed to one may fail")
 		}
 	}
 	a.dropCode = func(code string) { mm.Broadcast(frameCodeRedeem, code) }
-	mm.Handle(frameCode, func(_ string, data json.RawMessage) {
+	a.claimCode = func(code, owner string) (bool, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), codeShareTimeout*2)
+		defer cancel()
+		var granted bool
+		if err := mm.Request(ctx, owner, frameCodeClaim, code, &granted); err != nil {
+			return false, err
+		}
+		return granted, nil
+	}
+	mm.HandleRequest(frameCodeClaim, func(_ string, data json.RawMessage) any {
+		var code string
+		if json.Unmarshal(data, &code) != nil {
+			return false
+		}
+		granted := a.claim(code)
+		if granted {
+			mm.Broadcast(frameCodeRedeem, code) // the other copies go
+		}
+		return granted
+	})
+	mm.Handle(frameCode, func(origin string, data json.RawMessage) {
 		var f codeFrame
 		if json.Unmarshal(data, &f) != nil || f.Code == "" {
+			return
+		}
+		if !hmac.Equal([]byte(f.MAC), []byte(a.codeMAC(f))) {
+			a.logger.Warn().Str("origin", origin).Msg("mesh: an authorization code from a peer failed its MAC; dropped")
 			return
 		}
 		a.putCode(f.Code, authCode{
 			challenge: f.Challenge, clientID: f.ClientID, redirectURI: f.RedirectURI,
 			resource: f.Resource, sub: f.Sub, scopes: f.Scopes, expiresAt: time.Unix(f.ExpiresAt, 0),
+			owner: origin,
 		})
 	})
 	mm.Handle(frameCodeRedeem, func(_ string, data json.RawMessage) {

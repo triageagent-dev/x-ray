@@ -327,3 +327,110 @@ func testScheme(t *testing.T) *runtime.Scheme {
 	require.NoError(t, mcell.AddToScheme(sc))
 	return sc
 }
+
+// A code is single-use across replicas: when the same code reaches two replicas at
+// once, each holding a copy, the replica that issued it lets one of them redeem it.
+func TestReplicas_ACodeRedeemedOnTwoReplicasAtOnceIssuesOneToken(t *testing.T) {
+	ms := meshtest.Group(t, 3)
+	auths := make([]*mcpAuthorizer, len(ms))
+	for i, m := range ms {
+		auths[i] = newTestAuthorizer(t, true, nil)
+		if i > 0 {
+			auths[i].key, auths[i].kid = auths[0].key, auths[0].kid
+		}
+		auths[i].JoinMesh(m)
+	}
+	meshtest.Run(t, ms...)
+	// Wait until every replica can address the others by name.
+	require.Eventually(t, func() bool {
+		for _, m := range ms {
+			if m.Connected() < len(ms)-1 {
+				return false
+			}
+		}
+		return true
+	}, 5*time.Second, 20*time.Millisecond)
+	time.Sleep(100 * time.Millisecond) // the hellos that name the peers
+
+	verifier, challenge := pkcePair()
+	issued := authCode{challenge: challenge, clientID: "c", redirectURI: "http://127.0.0.1/cb", resource: testResource, sub: "github:1", scopes: []string{scopeRead}, expiresAt: time.Now().Add(time.Minute)}
+	auths[0].putCode("code-1", issued)
+	auths[0].shareCode("code-1", issued)
+
+	form := url.Values{"grant_type": {"authorization_code"}, "code": {"code-1"}, "code_verifier": {verifier}, "client_id": {"c"}, "redirect_uri": {"http://127.0.0.1/cb"}}
+	post := func(a *mcpAuthorizer) int {
+		req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		w := httptest.NewRecorder()
+		a.handleToken(w, req)
+		return w.Code
+	}
+
+	// The issuing replica and both others, all at once.
+	codes := make([]int, len(auths))
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := range auths {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			codes[i] = post(auths[i])
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	ok := 0
+	for _, c := range codes {
+		if c == http.StatusOK {
+			ok++
+		}
+	}
+	assert.Equal(t, 1, ok, "one token for one code, whichever replicas it reached: %v", codes)
+}
+
+func TestReplicas_ACodeWhoseOwnerCannotBeAskedIsNotRedeemed(t *testing.T) {
+	ma, mb := meshtest.Pair(t)
+	a, b := newTestAuthorizer(t, true, nil), newTestAuthorizer(t, true, nil)
+	b.key, b.kid = a.key, a.kid
+	a.JoinMesh(ma)
+	b.JoinMesh(mb)
+	meshtest.Run(t, ma, mb)
+
+	verifier, challenge := pkcePair()
+	// b holds a copy of a code whose owner, "gone", is not connected.
+	b.putCode("code-2", authCode{challenge: challenge, clientID: "c", redirectURI: "http://127.0.0.1/cb", resource: testResource, sub: "github:1", scopes: []string{scopeRead}, expiresAt: time.Now().Add(time.Minute), owner: "gone"})
+
+	form := url.Values{"grant_type": {"authorization_code"}, "code": {"code-2"}, "code_verifier": {verifier}}
+	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	b.handleToken(w, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code, "no token when the replica that decides cannot be asked")
+	assert.Contains(t, w.Body.String(), "temporarily_unavailable")
+}
+
+// A peer that holds the mesh certificate but not the signing secret cannot plant a
+// code: it would be exchanged for a token for whatever subject and scopes it names.
+func TestReplicas_AForgedAuthorizationCodeIsDropped(t *testing.T) {
+	ma, mb := meshtest.Pair(t)
+	a := newTestAuthorizer(t, true, nil)
+	a.JoinMesh(ma)
+	meshtest.Run(t, ma, mb)
+
+	forged := codeFrame{Code: "evil", Challenge: "c", ClientID: "c", RedirectURI: "http://127.0.0.1/cb", Resource: testResource, Sub: "github:1", Scopes: []string{scopeWrite}, ExpiresAt: time.Now().Add(time.Minute).Unix(), MAC: "00"}
+	mb.Broadcast(frameCode, forged)
+	// A frame with a MAC made under another key is no better.
+	other := newTestAuthorizer(t, true, nil)
+	forged.Code = "evil2"
+	forged.MAC = other.codeMAC(forged)
+	mb.Broadcast(frameCode, forged)
+
+	time.Sleep(300 * time.Millisecond)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	assert.NotContains(t, a.codes, "evil")
+	assert.NotContains(t, a.codes, "evil2")
+}

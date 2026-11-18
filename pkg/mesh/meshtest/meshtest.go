@@ -11,6 +11,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"net"
 	"testing"
@@ -110,4 +111,30 @@ func freeAddr(t *testing.T) string {
 	}
 	defer l.Close()
 	return l.Addr().String()
+}
+
+// Group returns n replicas, "r0" to "r<n-1>", each dialing every other, not yet
+// started.
+func Group(t *testing.T, n int) []*mesh.Mesh {
+	t.Helper()
+	ca, caPEM := newCA(t)
+	addrs := make([]string, n)
+	for i := range addrs {
+		addrs[i] = freeAddr(t)
+	}
+	out := make([]*mesh.Mesh, n)
+	for i := range out {
+		var peers []string
+		for j, a := range addrs {
+			if j != i {
+				peers = append(peers, a)
+			}
+		}
+		tc, err := mesh.NewTLS(caPEM, issue(t, ca, int64(10+i)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		out[i] = mesh.New(mesh.Config{Self: fmt.Sprintf("r%d", i), Address: addrs[i], StaticPeers: peers, TLS: tc, DialInterval: 50 * time.Millisecond, Logger: zerolog.Nop()})
+	}
+	return out
 }
