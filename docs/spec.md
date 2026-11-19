@@ -284,7 +284,7 @@ Every route under `/v1` needs a session except the sign-in routes, `/v1/version`
 | Session | A 24-hour `xray_session` cookie. The same token is accepted as `Authorization: Bearer`, and on a WebSocket upgrade as a subprotocol, because a browser cannot set headers on that handshake |
 | Session to another origin | A login may hand its token to a UI on a different host through `?ui=<origin>`, only for origins in `--ui-callback-origins`. Empty by default |
 | MCP, shared secret | A Secret named by `--mcp-token-secret`, key `token`. Full scope |
-| MCP, OAuth 2.1 | `--mcp-oauth`. The server is its own authorization server: discovery under `/.well-known`, `/register`, `/authorize`, `/token`, with PKCE. Tokens are audience-bound JWTs with the read and write scopes; `--mcp-token-ttl` sets their lifetime. The user must be signed in to the web app first. `--mcp-static-client-id` and `--mcp-static-client-redirect-uris` pre-register one public client which must use one of those redirect URIs exactly (https, or http on loopback) and which the user approves on a consent page; open registration takes loopback and custom-scheme redirect URIs only. `/token` rejects a `client_id` or `redirect_uri` that is sent and does not match the code (ADR-065) |
+| MCP, OAuth 2.1 | `--mcp-oauth`. The server is its own authorization server: discovery under `/.well-known`, `/register`, `/authorize`, `/token`, with PKCE. Tokens are audience-bound JWTs with the read and write scopes; `--mcp-token-ttl` sets their lifetime. The user must be signed in to the web app first. `--mcp-static-client-id` and `--mcp-static-client-redirect-uris` pre-register one public client which must use one of those redirect URIs exactly (https, or http on loopback) and which the user approves on a consent page; open registration takes loopback and custom-scheme redirect URIs only. `/token` rejects a `client_id` or `redirect_uri` that is sent and does not match the code (ADR-065). With `--mcp-member-access`, a signed-in non-admin gets read and `xray:memory.write.own`: shared cells, and their own private notes only (ADR-067) |
 | Write access | `writeAllowedUsers` in the configuration cell and `--access-admins` name who may hold the write scope |
 
 `--public-url` is the externally reachable base URL. It scopes CORS, the OAuth callbacks and the origin check on the voice WebSocket. The origin check compares the scheme and host only. A path in it (`https://gw.example.com/path`) mounts the server under that path on a shared host: redirects, the session and state cookies, the PWA manifest and the service worker stay under it, and the OAuth metadata is also served at the host root with the path inserted (RFC 8414, RFC 9728). The proxy forwards the path unchanged, and the UI in the image must be built for it (`make build BASE_PATH=/path`; ADR-064). `--trusted-proxy-hops` says how many proxies in front of the server append the client address, which decides how `X-Forwarded-For` is read for rate limiting. `--max-request-bytes` caps request bodies.
@@ -476,22 +476,25 @@ A delete of a cell that another replica already removed counts as done, so the s
 
 ## Replicas
 
-The chart runs one replica, and one is the supported setting. Cells, sessions and tokens are shared through the cluster. The remaining state is held by the pod.
+With more than one replica the chart turns on `--leader-elect` and the replica mesh (ADR-068). With one replica neither is on and nothing changes. Cells, sessions and tokens are shared through the cluster; the mesh closes the gap until the next write, for state a request may need on another replica.
 
 | State | Across replicas |
 |---|---|
 | Cells | Shared. Every replica reads the same cache |
-| Sign-in sessions, OAuth clients | Shared, through cells and a common HMAC key |
-| MCP access tokens | Shared when an OAuth client secret is set: every replica derives the same signing key from it |
 | Search indexes | Each pod builds its own from the cells and follows the cluster watch: a cell another replica writes, retires or deletes is indexed or dropped here |
 | Live change events | Every pod announces each change it sees through the watch, so a browser sees changes made on any replica |
 | Live search-hit events | Per pod. A browser sees the search pulses of the replica it is connected to |
-| Items written without a cluster client | Per pod |
+| Sign-in sessions, OAuth clients | Shared at once over the mesh, and through cells and a common HMAC key after a restart |
+| A sign-in in flight | The provider's callback may reach any replica: it asks the replica that started the sign-in, which the state names, and the state is used once |
+| MCP access tokens | Shared when an OAuth client secret is set: every replica derives the same signing key from it |
+| MCP authorization codes | Shared over the mesh. The replica that issued a code decides who redeems it, so a code is used once even when it reaches two replicas at once |
+| Counters and each person's daily token spend | Each replica sends its own running totals and adds up what the others counted, so a daily cap holds for the whole service. The leader writes them to the configuration cell's status |
+| Retention sweep, episodic reaper, deadline deletes, cell write-backs | Leader only, elected with a Kubernetes Lease (`--leader-elect`) |
 | Voice sessions | Bound to the connection, so to one pod |
-| Voice quota counters | Held per pod and mirrored to the configuration cell's status, so several replicas do not add up |
-| Retention | Runs on every replica; deletes are idempotent |
+| Voice session cap, rate limits | Per pod: the effective limit is the setting times the number of replicas |
+| Items written without a cluster client | Per pod |
 
-There is no leader election, because the server has no work that must run once. Search-hit events have publish hooks (`SetHitPublishHook`) and an apply call for remote events, but no transport is wired to them, so those pulses stay on the pod that served the search.
+The mesh: replicas find each other through a headless Service and talk over mutual TLS, with a certificate the chart generates and keeps across upgrades (`--mesh-tls-dir`, `--mesh-address`, `--mesh-port`, `--mesh-service`). It is best effort: what travels is level state that is resent on connect and every 30 seconds, or can be read back from the cell. A connection is accepted only from a pod the Service resolves to, and an authorization code carries a MAC under the OAuth signing secret. Run X-Ray in a namespace of its own and limit the mesh port to the release's pods with a NetworkPolicy. Two replicas that restate the same fact at the same moment may each create a cell until the watch catches up. A leader that stops without handing the lease back is waited out: another replica leads after about 15 to 20 seconds.
 
 ## Configuration
 
@@ -505,7 +508,8 @@ Flags set the baseline. The configuration cell and the chart's `values.yaml` ove
 | Maps | `--mental-maps-dir`, `--mental-maps-snapshot-key`, `--registry-pull-secret`, `--mental-maps-route-fanout` 1, `--mental-maps-ttl-min` 0 |
 | Graph server | `xray graph serve-snapshots`: `-snapshot-dir`, `-addr` 127.0.0.1:8085, `-writable`, `-memory-map` session, `-memory-ttl` 7d, `-skills-map` skills, `-graph-ttl-min` 0, `-route-fanout` 1, `-embedding-endpoint` http://localhost:8090, `-embedding-model` nomic, `-embedding-dims` 256, `-embedding-max-input-chars` 8192, `-embedding-max-input-tokens` 0, `-snapshot-key`, `-auth-token-file`, `-allowed-hosts`, `-allowed-origins`. `serve` takes `-repo` and listens on 127.0.0.1:8084 |
 | Voice | `--gemini-api-key`, `--voice-model`, `--voice-location`, `--voice-name`, `--user-daily-audio-token-limit`, `--max-concurrent-voice`, `--voice-max-output-tokens`, `--voice-affective-dialog`, `--voice-proactive-audio`, `--voice-session-resumption`, `--voice-context-trigger-tokens`, `--voice-context-target-tokens` |
-| Sign-in and MCP | `--public-url`, `--github-client-id`, `--github-client-secret`, `--github-org`, `--github-team`, `--azure-client-id`, `--azure-client-secret`, `--azure-tenant-id`, `--google-client-id`, `--google-client-secret`, `--google-domain`, `--access-users`, `--access-admins`, `--ui-callback-origins`, `--mcp-token-secret`, `--mcp-oauth`, `--mcp-resource-url`, `--mcp-token-ttl` 15m, `--mcp-static-client-id`, `--mcp-static-client-redirect-uris`, `--dev` |
+| Sign-in and MCP | `--public-url`, `--github-client-id`, `--github-client-secret`, `--github-org`, `--github-team`, `--azure-client-id`, `--azure-client-secret`, `--azure-tenant-id`, `--google-client-id`, `--google-client-secret`, `--google-domain`, `--access-users`, `--access-admins`, `--ui-callback-origins`, `--mcp-token-secret`, `--mcp-oauth`, `--mcp-resource-url`, `--mcp-token-ttl` 15m, `--mcp-static-client-id`, `--mcp-static-client-redirect-uris`, `--mcp-member-access`, `--dev` |
+| Replicas | `--leader-elect`, `--leader-lease-name` xray-leader, `--mesh-tls-dir`, `--mesh-address` :8085, `--mesh-port` 8085, `--mesh-service` |
 | Retention | `--episodic-ttl` 168h, `--retention-sweep-interval` 1h |
 | Requests | `--max-request-bytes` 1 MiB, `--trusted-proxy-hops` 0 |
 | Tracing | `--otel-endpoint`, `--otel-project`, `--otel-service-name` (default `xray`; one per instance tells instances apart), `--otel-token-secret` |
@@ -514,7 +518,8 @@ Flags set the baseline. The configuration cell and the chart's `values.yaml` ove
 
 | Value | Effect |
 |---|---|
-| replicaCount | 1 |
+| replicaCount | 1. Above 1 the chart adds `--leader-elect` and the mesh (a generated certificate Secret, a headless Service, the `leases` permission) |
+| leaderElect, mesh.enabled, mesh.port | Turn the leader election or the mesh on with one replica; the mesh port (8085) |
 | namespace | A namespace dedicated to X-Ray: the server may list and watch every Secret in it |
 | publicURL | Passed as `--public-url` |
 | args | The flag list given to the container |

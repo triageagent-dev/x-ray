@@ -3,6 +3,7 @@ package xray
 import (
 	"sync"
 	"sync/atomic"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	toolscache "k8s.io/client-go/tools/cache"
@@ -165,6 +166,11 @@ func (w *ConfigWatcher) update(obj any) {
 	cfg := parseVoiceConfig(cell)
 	w.val.Store(cfg)
 	if w.memory != nil {
+		// The sender totals the counters were written with go back first, so the
+		// first total a peer sends is measured against them (ADR-068).
+		if !w.memory.seeded.Load() {
+			w.memory.restoreMeshTotals(cell.Spec.Data[meshTotalsKey].Bytes, time.Now())
+		}
 		w.memory.RestoreStats(cell.Status.Stats)
 	}
 }

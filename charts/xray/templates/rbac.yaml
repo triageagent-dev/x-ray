@@ -39,6 +39,12 @@ rules:
   - apiGroups: ["xray.triageagent.dev"]
     resources: ["memorycells/status"]
     verbs: ["get", "update", "patch"]
+  {{- if or .Values.leaderElect (gt (int .Values.replicaCount) 1) }}
+  # --leader-elect (ADR-068): the Lease the replicas campaign for.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update"]
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

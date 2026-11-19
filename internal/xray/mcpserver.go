@@ -30,6 +30,53 @@ var writeScopeTools = map[string]bool{
 	"supersede_memory":   true,
 }
 
+// memberWriteTools are the write tools a token holding scopeWriteOwn may call.
+// consolidate_memory is not among them: it writes shared cells.
+var memberWriteTools = map[string]bool{
+	"upsert_memory":    true,
+	"delete_memory":    true,
+	"refute_memory":    true,
+	"expire_memory":    true,
+	"supersede_memory": true,
+}
+
+type memberOwnerKey struct{}
+
+// withMemberOwner binds a request to one owner hash: a member token never acts
+// on another person's private cells, whatever subject the caller passes (ADR 067).
+func withMemberOwner(ctx context.Context, ownerHash string) context.Context {
+	return context.WithValue(ctx, memberOwnerKey{}, ownerHash)
+}
+
+// memberOwner returns the owner hash of an owner-bound request.
+func memberOwner(ctx context.Context) (string, bool) {
+	h, ok := ctx.Value(memberOwnerKey{}).(string)
+	return h, ok
+}
+
+// boundSubject is the subject a read uses: an owner-bound caller's non-empty
+// subject becomes their own hash, an empty one stays empty (shared cells only).
+func boundSubject(ctx context.Context, subject string) string {
+	if owner, ok := memberOwner(ctx); ok && subject != "" {
+		return owner
+	}
+	return subject
+}
+
+// memberPrivateLimit caps the private cells, in any status, one member may hold.
+// Only delete_memory frees room: expired and superseded cells still count.
+const memberPrivateLimit = 1000
+
+// ownsPrivate reports whether it is a private cell owned by owner.
+func ownsPrivate(it *MemoryItem, owner string) bool {
+	return it != nil && isPrivateScope(it.Scope) && it.Subject == owner
+}
+
+const (
+	errMembersPrivateOnly = `{"error":"members can write private notes only"}`
+	errMemberSharedTarget = `{"error":"forbidden","reason":"members can change their own private notes only"}`
+)
+
 // DefaultMCPListMemoryMaxLimit / DefaultMCPSearchMemoryMaxLimit are the
 // fallback hard result-count ceilings for list_memory/search_memory when the
 // caller (main.go) doesn't override them via --mcp-list-memory-max-limit /
@@ -79,6 +126,10 @@ func NewMCPServer(memory *MemoryStore, logger zerolog.Logger, getToken func() st
 		mcp.WithDescription("Get an orientation summary of stored memory: item counts by kind and the memory summary text. Call this for a quick overview before deciding whether to list or search."),
 	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		items := memory.AllItems("")
+		if owner, ok := memberOwner(ctx); ok {
+			// shared cells plus the caller's own private ones, never another's
+			items = append(items, memory.List("", scopePrivate, owner, 0)...)
+		}
 		counts := map[string]int{}
 		for _, it := range items {
 			counts[it.Kind]++
@@ -106,6 +157,8 @@ func NewMCPServer(memory *MemoryStore, logger zerolog.Logger, getToken func() st
 	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		args := req.GetArguments()
 		subject, _ := args["subject"].(string)
+		subject = boundSubject(ctx, subject)
+		_, bound := memberOwner(ctx)
 		var ids []string
 		if raw, ok := args["ids"].([]any); ok {
 			for _, v := range raw {
@@ -120,7 +173,7 @@ func NewMCPServer(memory *MemoryStore, logger zerolog.Logger, getToken func() st
 			if it == nil {
 				continue
 			}
-			if isPrivateScope(it.Scope) && it.Subject != subject {
+			if isPrivateScope(it.Scope) && (it.Subject != subject || (bound && subject == "")) {
 				continue
 			}
 			items = append(items, it)
@@ -141,6 +194,7 @@ func NewMCPServer(memory *MemoryStore, logger zerolog.Logger, getToken func() st
 	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		args := req.GetArguments()
 		subject, _ := args["subject"].(string)
+		subject = boundSubject(ctx, subject)
 		limit := recentMemoryMaxLimit
 		if l, ok := args["limit"].(float64); ok && l > 0 {
 			limit = int(l)
@@ -173,6 +227,7 @@ func NewMCPServer(memory *MemoryStore, logger zerolog.Logger, getToken func() st
 		args := req.GetArguments()
 		kind, _ := args["kind"].(string)
 		subject, _ := args["subject"].(string)
+		subject = boundSubject(ctx, subject)
 		if msg := ValidateSearchKind(kind); msg != "" {
 			return mcp.NewToolResultText(errJSON(msg)), nil
 		}
@@ -184,6 +239,16 @@ func NewMCPServer(memory *MemoryStore, logger zerolog.Logger, getToken func() st
 			limit = listMemoryMaxLimit
 		}
 		items := memory.FilterItems(subject, kind)
+		if _, bound := memberOwner(ctx); bound && subject == "" {
+			// an empty subject is the shared view: no private cell at all
+			shared := items[:0]
+			for _, it := range items {
+				if !isPrivateItem(it.Kind, it.Scope) {
+					shared = append(shared, it)
+				}
+			}
+			items = shared
+		}
 		if len(items) > limit {
 			items = items[:limit]
 		}
@@ -198,6 +263,7 @@ func NewMCPServer(memory *MemoryStore, logger zerolog.Logger, getToken func() st
 		args := req.GetArguments()
 		query, _ := args["query"].(string)
 		subject, _ := args["subject"].(string)
+		subject = boundSubject(ctx, subject)
 		kind, _ := args["kind"].(string)
 		// Private cells are tenant-isolated by subject (ADR-028/037): the store
 		// hides them whenever subject is empty, so an unscoped search returns only
@@ -267,6 +333,27 @@ func NewMCPServer(memory *MemoryStore, logger zerolog.Logger, getToken func() st
 		imageMime, _ := args["image_mime"].(string)
 		tags := stringList(args["tags"])
 		evidence := stringList(args["evidence_refs"])
+		if owner, ok := memberOwner(ctx); ok {
+			// A member writes private notes of their own: scope defaults to
+			// private, shared is refused, the owner is the caller.
+			if scope == "" {
+				scope = scopePrivate
+			}
+			if scope != scopePrivate {
+				return mcp.NewToolResultText(errMembersPrivateOnly), nil
+			}
+			subject = owner
+			// A member cannot pick an id: it must name the member's own private
+			// cell. A missing id and someone else's cell answer the same, so the
+			// call is no oracle for which ids exist (ADR-067).
+			if id != "" {
+				if !ownsPrivate(memory.GetItem(id), owner) {
+					return mcp.NewToolResultText(`{"error":"not found"}`), nil
+				}
+			} else if memory.CountPrivateOwned(owner) >= memberPrivateLimit {
+				return mcp.NewToolResultText(`{"error":"private note limit reached"}`), nil
+			}
+		}
 		if msg := ValidateWrite(kind, confidence); msg != "" {
 			return mcp.NewToolResultText(errJSON(msg)), nil
 		}
@@ -348,6 +435,10 @@ func NewMCPServer(memory *MemoryStore, logger zerolog.Logger, getToken func() st
 		id, _ := args["id"].(string)
 		reason, _ := args["reason"].(string)
 		subject, _ := args["subject"].(string)
+		owner, bound := memberOwner(ctx)
+		if bound {
+			subject = owner
+		}
 		if strings.TrimSpace(reason) == "" {
 			return mcp.NewToolResultText(`{"error":"reason is required"}`), nil
 		}
@@ -355,10 +446,19 @@ func NewMCPServer(memory *MemoryStore, logger zerolog.Logger, getToken func() st
 		if item == nil || (isPrivateScope(item.Scope) && item.Subject != subject) {
 			return mcp.NewToolResultText(`{"error":"not found"}`), nil
 		}
-		changed, _ := memory.Refute(ctx, id, reason, stringList(args["evidence"]))
+		if bound && !isPrivateScope(item.Scope) {
+			return mcp.NewToolResultText(errMemberSharedTarget), nil
+		}
+		var changed []*MemoryItem
+		if bound {
+			// no cascade: a member's refutation never reaches a cell they do not own
+			changed, _ = memory.RefuteOnly(ctx, id, reason, stringList(args["evidence"]))
+		} else {
+			changed, _ = memory.Refute(ctx, id, reason, stringList(args["evidence"]))
+		}
 		persistAll(changed)
 		cascaded := make([]string, 0, len(changed))
-		for _, c := range changed[1:] {
+		for _, c := range changed[min(1, len(changed)):] {
 			cascaded = append(cascaded, c.ID)
 		}
 		logger.Info().Str("id", id).Int("cascaded", len(cascaded)).Msg("mcp refute_memory")
@@ -389,9 +489,16 @@ func NewMCPServer(memory *MemoryStore, logger zerolog.Logger, getToken func() st
 		args := req.GetArguments()
 		id, _ := args["id"].(string)
 		subject, _ := args["subject"].(string)
+		owner, bound := memberOwner(ctx)
+		if bound {
+			subject = owner
+		}
 		item := memory.GetItem(id)
 		if item == nil || (isPrivateScope(item.Scope) && item.Subject != subject) {
 			return mcp.NewToolResultText(`{"error":"not found"}`), nil
+		}
+		if bound && !isPrivateScope(item.Scope) {
+			return mcp.NewToolResultText(errMemberSharedTarget), nil
 		}
 		persistAll([]*MemoryItem{memory.Expire(id)})
 		logger.Info().Str("id", id).Msg("mcp expire_memory")
@@ -415,6 +522,22 @@ func NewMCPServer(memory *MemoryStore, logger zerolog.Logger, getToken func() st
 		args := req.GetArguments()
 		str := func(k string) string { v, _ := args[k].(string); return v }
 		oldID, kind, scope, subject, confidence := str("old_id"), str("kind"), str("scope"), str("subject"), str("confidence")
+		owner, bound := memberOwner(ctx)
+		if bound {
+			if scope == "" {
+				scope = scopePrivate
+			}
+			if scope != scopePrivate {
+				return mcp.NewToolResultText(errMembersPrivateOnly), nil
+			}
+			subject = owner
+			if nid := str("new_id"); nid != "" && !ownsPrivate(memory.GetItem(nid), owner) {
+				return mcp.NewToolResultText(errJSON("not found")), nil
+			}
+			if nid := str("new_id"); nid == "" && memory.CountPrivateOwned(owner) >= memberPrivateLimit {
+				return mcp.NewToolResultText(errJSON("private note limit reached")), nil
+			}
+		}
 		if msg := ValidateWrite(kind, confidence); msg != "" {
 			return mcp.NewToolResultText(errJSON(msg)), nil
 		}
@@ -424,6 +547,9 @@ func NewMCPServer(memory *MemoryStore, logger zerolog.Logger, getToken func() st
 		old := memory.GetItem(oldID)
 		if old == nil || (isPrivateScope(old.Scope) && old.Subject != subject) {
 			return mcp.NewToolResultText(errJSON("not found")), nil
+		}
+		if bound && !isPrivateScope(old.Scope) {
+			return mcp.NewToolResultText(errMemberSharedTarget), nil
 		}
 		var opts []UpsertOption
 		if ev := stringList(args["evidence_refs"]); ev != nil {
@@ -490,9 +616,17 @@ func NewMCPServer(memory *MemoryStore, logger zerolog.Logger, getToken func() st
 		args := req.GetArguments()
 		id, _ := args["id"].(string)
 		subject, _ := args["subject"].(string)
+		owner, bound := memberOwner(ctx)
+		if bound {
+			subject = owner
+		}
 		item := memory.GetItem(id)
-		if item == nil {
+		if item == nil || (bound && isPrivateScope(item.Scope) && item.Subject != subject) {
+			// for a member, another person's cell answers like a missing one
 			return mcp.NewToolResultText(`{"error":"not found","id":"` + id + `"}`), nil
+		}
+		if bound && !isPrivateScope(item.Scope) {
+			return mcp.NewToolResultText(errMemberSharedTarget), nil
 		}
 		// A private item is only deletable by the subject that owns it — the same
 		// tenant-isolation rule search_memory/list_memory/upsert_memory apply
@@ -543,14 +677,15 @@ func NewMCPServer(memory *MemoryStore, logger zerolog.Logger, getToken func() st
 
 		cred := bearerToken(r)
 		var scopes []string
+		var sub string
 		authed := false
 		// A write is human when the credential names a person (an OAuth JWT with
 		// a subject), derived otherwise: the shared secret identifies nobody.
 		origin := OriginDerived
 		// 1. OAuth JWT (per-user scopes).
 		if auth != nil && cred != "" {
-			if sub, sc, ok := auth.validateMCPToken(cred); ok {
-				scopes, authed = sc, true
+			if s, sc, ok := auth.validateMCPToken(cred); ok {
+				sub, scopes, authed = s, sc, true
 				if sub != "" {
 					origin = OriginHuman
 				}
@@ -571,10 +706,25 @@ func NewMCPServer(memory *MemoryStore, logger zerolog.Logger, getToken func() st
 		// read scope. Body is restored for the downstream handler.
 		tool, body := peekToolCall(r)
 		need := scopeRead
+		allowed := hasScope(scopes, need)
 		if writeScopeTools[tool] {
 			need = scopeWrite
+			allowed = hasScope(scopes, scopeWrite) || (memberWriteTools[tool] && hasScope(scopes, scopeWriteOwn))
 		}
-		if !hasScope(scopes, need) {
+		// A token without the full write scope is a member's: it is bound to its
+		// own hash. A bound token that names no subject has no owner: refuse it.
+		bound := !hasScope(scopes, scopeWrite)
+		if bound && sub == "" {
+			allowed = false
+		}
+		// Turning --mcp-member-access off cuts member tokens already issued.
+		if bound && hasScope(scopes, scopeWriteOwn) && (auth == nil || !auth.memberAccess) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"member access is off"}`)) //nolint:errcheck
+			return
+		}
+		if !allowed {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
 			w.Write([]byte(`{"error":"insufficient_scope","scope":"` + need + `"}`)) //nolint:errcheck
@@ -582,6 +732,9 @@ func NewMCPServer(memory *MemoryStore, logger zerolog.Logger, getToken func() st
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		r = r.WithContext(withWriteOrigin(r.Context(), origin))
+		if bound {
+			r = r.WithContext(withMemberOwner(r.Context(), stableUserID(sub)))
+		}
 
 		if !limiter.allow(clientIP(r.Header.Get("X-Forwarded-For"), r.Header.Get("X-Real-IP"), r.RemoteAddr)) {
 			http.Error(w, `{"error":"rate limited"}`, http.StatusTooManyRequests)
@@ -609,7 +762,7 @@ func challenge(w http.ResponseWriter, auth *mcpAuthorizer) {
 		w.Header().Set("WWW-Authenticate",
 			`Bearer realm="mcp", resource_metadata="`+auth.issuer+
 				`/.well-known/oauth-protected-resource", scope="`+
-				scopeRead+" "+scopeWrite+`"`)
+				strings.Join(auth.advertisedScopes(), " ")+`"`)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusUnauthorized)

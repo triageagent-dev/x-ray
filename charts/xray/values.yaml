@@ -1,5 +1,18 @@
 replicaCount: 1
 
+# Elect one replica, with a Kubernetes Lease, for the work that must run once
+# (sweeps that delete expired memory, cell write-backs; ADR-068). On by itself
+# when replicaCount is above 1; set true to elect with a single replica.
+leaderElect: false
+
+# The replica mesh (ADR-068): replicas share their counters, daily token spend,
+# logins, OAuth client registrations and authorization codes over mutual TLS, with
+# a self-signed certificate the chart generates. On by itself when replicaCount is
+# above 1; set enabled to run it with one replica.
+mesh:
+  enabled: false
+  port: 8085
+
 # GKE Application CR (GKE-specific, off by default)
 application:
   create: false
@@ -97,6 +110,7 @@ args:
   # - --mcp-address=
   # - --mcp-resource-url=https://xray.example.com/mcp
   # - --mcp-token-ttl=3h
+  # - --mcp-member-access   # signed-in non-admins read shared memory and keep their own notes
   #
   # Voice (Gemini Live) on Vertex AI, or with --gemini-api-key:
   # - --gcp-project=YOUR_GCP_PROJECT

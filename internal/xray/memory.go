@@ -788,6 +788,22 @@ func (s *MemoryStore) Refute(ctx context.Context, id, reason string, evidence []
 	return changed, true
 }
 
+// CountPrivateOwned is how many private cells owner holds, in any status.
+func (s *MemoryStore) CountPrivateOwned(owner string) int { return s.eng.CountPrivateOwned(owner) }
+
+// RefuteOnly is Refute without the cascade: the named cell alone is retired.
+// An owner-bound MCP caller uses it, so a refutation never reaches a cell the
+// caller does not own (ADR-067).
+func (s *MemoryStore) RefuteOnly(ctx context.Context, id, reason string, evidence []string) (changed []*MemoryItem, found bool) {
+	id = strings.TrimSpace(id)
+	if !s.eng.RefuteOnly(id, reason, evidence, time.Now()) {
+		return nil, false
+	}
+	after, _ := s.eng.Get(id)
+	s.retired(after)
+	return []*MemoryItem{viewOf(after)}, true
+}
+
 // ConsolidationGroup is one near-duplicate cluster found by ConsolidateMemory:
 // Keep is the id a reader should trust going forward, Superseded lists every
 // other member's id (parallel to Scores, each member's score against Keep).
@@ -1282,7 +1298,10 @@ func (s *MemoryStore) StartEpisodicReaper(ctx context.Context, syncer *CellSynce
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				s.reapExpiredEpisodic(ctx, syncer)
+				// One replica reaps: the others see the cells go and forget them.
+				if syncer == nil || syncer.isLeader() {
+					s.reapExpiredEpisodic(ctx, syncer)
+				}
 			}
 		}
 	}()

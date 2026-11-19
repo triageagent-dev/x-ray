@@ -29,6 +29,8 @@ import (
 const (
 	scopeRead  = "xray:memory.read"
 	scopeWrite = "xray:memory.write"
+	// scopeWriteOwn lets a member write private notes of their own only (ADR 067).
+	scopeWriteOwn = "xray:memory.write.own"
 )
 
 // allMCPScopes is what the authorization server advertises and what a fully
@@ -65,8 +67,9 @@ const (
 // pattern (and the same ordering lesson) as session persistence (ADR-047).
 type oauthClientStore struct {
 	mu       sync.Mutex
-	clients  map[string]oauthClient // client_id → registration
-	onChange func()                 // marks stats dirty so the debounced flusher persists; nil = no persistence
+	clients  map[string]oauthClient     // client_id → registration
+	onChange func()                     // marks stats dirty so the debounced flusher persists; nil = no persistence
+	onAdd    func(mcell.OAuthClientReg) // tells the other replicas of a registration (ADR-068); nil = runs alone
 }
 
 var oauthClients = &oauthClientStore{clients: make(map[string]oauthClient)}
@@ -95,10 +98,13 @@ func (s *oauthClientStore) add(clientID string, c oauthClient) {
 		delete(s.clients, oldestID)
 	}
 	s.clients[clientID] = c
-	onChange := s.onChange
+	onChange, onAdd := s.onChange, s.onAdd
 	s.mu.Unlock()
 	if onChange != nil {
 		onChange()
+	}
+	if onAdd != nil {
+		onAdd(mcell.OAuthClientReg{ClientID: clientID, RedirectURIs: append([]string(nil), c.redirectURIs...), IssuedAt: c.issuedAt.UTC().Format(time.RFC3339)})
 	}
 }
 
@@ -182,9 +188,22 @@ type mcpAuthorizer struct {
 	static map[string][]string
 	mu     sync.Mutex
 	codes  map[string]authCode
+	// shareCode hands a code just issued to the other replicas and returns when
+	// they have it, so the client's call to /token may land on any of them;
+	// dropCode tells them it was redeemed. Nil when this replica runs alone
+	// (ADR-068).
+	shareCode func(code string, c authCode)
+	dropCode  func(code string)
+	// claimCode asks the replica that issued a code whether it is still
+	// unredeemed, and marks it redeemed there. Nil when this replica runs alone.
+	claimCode func(code, owner string) (granted bool, err error)
 	// DCR client registrations live in the package-level oauthClients store (not a
 	// field here) so they can be restored from CR status before this authorizer is
 	// even constructed — see oauthClientStore. ADR-049.
+
+	// memberAccess (--mcp-member-access) lets a signed-in non-admin have a token
+	// with the member scopes instead of being denied. Off by default (ADR 067).
+	memberAccess bool
 }
 
 // authCode is a single-use OAuth authorization code bound to a PKCE challenge,
@@ -197,6 +216,10 @@ type authCode struct {
 	sub         string
 	scopes      []string
 	expiresAt   time.Time
+	// owner is the replica that issued the code, "" when this replica did. A code
+	// is single-use across replicas because one replica decides: a copy held here
+	// is redeemed only if the owner says it is still unredeemed (ADR-068).
+	owner string
 }
 
 // oauthClient is a dynamically registered public client (RFC 7591). Clients are
@@ -280,6 +303,19 @@ func (a *mcpAuthorizer) SetAllowFn(fn func() []string) {
 	}
 }
 
+// SetMemberAccess turns on member tokens for signed-in non-admins (ADR 067).
+// Call before serving.
+func (a *mcpAuthorizer) SetMemberAccess(on bool) { a.memberAccess = on }
+
+// advertisedScopes is what the discovery metadata and the 401 challenge list:
+// the admin scopes, plus the member scope only when member access is on.
+func (a *mcpAuthorizer) advertisedScopes() []string {
+	if a.memberAccess {
+		return []string{scopeRead, scopeWrite, scopeWriteOwn}
+	}
+	return allMCPScopes
+}
+
 // isMCPAllowed reports whether a user may use the MCP interface at all. MCP is
 // admin-only: read access is privileged (search/get can retrieve any user's
 // private notes by subject), so a user not on the allowlist gets no access. The
@@ -311,7 +347,7 @@ func (a *mcpAuthorizer) protectedResourceMetadata(w http.ResponseWriter, _ *http
 	writeJSON(w, map[string]any{
 		"resource":                 a.resource,
 		"authorization_servers":    []string{a.issuer},
-		"scopes_supported":         allMCPScopes,
+		"scopes_supported":         a.advertisedScopes(),
 		"bearer_methods_supported": []string{"header"},
 	})
 }
@@ -324,7 +360,7 @@ func (a *mcpAuthorizer) authServerMetadata(w http.ResponseWriter, _ *http.Reques
 		"token_endpoint":                        a.issuer + "/token",
 		"registration_endpoint":                 a.issuer + "/register",
 		"jwks_uri":                              a.issuer + "/.well-known/jwks.json",
-		"scopes_supported":                      allMCPScopes,
+		"scopes_supported":                      a.advertisedScopes(),
 		"response_types_supported":              []string{"code"},
 		"grant_types_supported":                 []string{"authorization_code"},
 		"code_challenge_methods_supported":      []string{"S256"},
@@ -570,7 +606,8 @@ func (a *mcpAuthorizer) handleAuthorize(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// MCP is admin-only. A logged-in but non-allowlisted user is denied a token
+	// MCP is admin-only unless --mcp-member-access is on (then a non-admin gets the
+	// member scopes below). A logged-in but non-allowlisted user is denied a token
 	// (OAuth 2.0 access_denied per RFC 6749 §4.1.2.1) rather than issued an
 	// empty-scope one — they never get a usable credential. The allowlist matches
 	// the userHash (stable, non-spoofable), not the display name.
@@ -579,7 +616,8 @@ func (a *mcpAuthorizer) handleAuthorize(w http.ResponseWriter, r *http.Request) 
 		userHash = sub // synthetic dev user: gate is bypassed by isMCPAllowed anyway
 	}
 	byGrant := !a.dev && grants.isAdmin(sub, username)
-	if !a.isMCPAllowed(userHash) && !byGrant {
+	admin := a.isMCPAllowed(userHash) || byGrant
+	if !admin && !a.memberAccess {
 		a.logger.Warn().Str("userHash", userHash).Msg("mcp authorize denied: user not on allowlist")
 		loc, err := url.Parse(redirectURI)
 		if err != nil {
@@ -611,29 +649,26 @@ func (a *mcpAuthorizer) handleAuthorize(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	code := randB64(32)
-	a.mu.Lock()
-	// Bound the map: at cap, evict the oldest code before inserting.
-	if len(a.codes) >= maxAuthCodes {
-		var oldestK string
-		var oldest time.Time
-		for k, c := range a.codes {
-			if oldestK == "" || c.expiresAt.Before(oldest) {
-				oldestK, oldest = k, c.expiresAt
-			}
-		}
-		delete(a.codes, oldestK)
+	scopes := a.grantedScopes(userHash, byGrant)
+	if !admin {
+		scopes = []string{scopeRead, scopeWriteOwn}
+		a.logger.Info().Str("userHash", userHash).Msg("mcp authorize: member")
 	}
-	a.codes[code] = authCode{
+
+	code := randB64(32)
+	issued := authCode{
 		challenge:   challenge,
 		clientID:    clientID,
 		redirectURI: redirectURI,
 		resource:    a.resource,
 		sub:         sub,
-		scopes:      a.grantedScopes(userHash, byGrant),
+		scopes:      scopes,
 		expiresAt:   time.Now().Add(2 * time.Minute),
 	}
-	a.mu.Unlock()
+	a.putCode(code, issued)
+	if a.shareCode != nil {
+		a.shareCode(code, issued)
+	}
 
 	loc, err := url.Parse(redirectURI)
 	if err != nil {
@@ -650,6 +685,45 @@ func (a *mcpAuthorizer) handleAuthorize(w http.ResponseWriter, r *http.Request) 
 	// `sub` is the provider OID (e.g. azure:<oid>) and must not land in logs.
 	a.logger.Info().Str("user", username).Str("userHash", userHash).Str("client_id", clientID).Str("redirect", loc.Host).Msg("mcp authorize: code issued")
 	http.Redirect(w, r, loc.String(), http.StatusFound)
+}
+
+// putCode stores a code. The map is bounded: at the cap the oldest code goes
+// before the new one is inserted.
+func (a *mcpAuthorizer) putCode(code string, c authCode) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.codes) >= maxAuthCodes {
+		var oldestK string
+		var oldest time.Time
+		for k, ex := range a.codes {
+			if oldestK == "" || ex.expiresAt.Before(oldest) {
+				oldestK, oldest = k, ex.expiresAt
+			}
+		}
+		delete(a.codes, oldestK)
+	}
+	a.codes[code] = c
+}
+
+// claim redeems a code this replica issued, for another replica that holds a copy:
+// true for the one request that finds it unredeemed. Under the lock, so of two
+// requests at once, on this replica or others, one gets it.
+func (a *mcpAuthorizer) claim(code string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	c, ok := a.codes[code]
+	if !ok || c.owner != "" || time.Now().After(c.expiresAt) {
+		return false
+	}
+	delete(a.codes, code)
+	return true
+}
+
+// forgetCode drops a code another replica redeemed.
+func (a *mcpAuthorizer) forgetCode(code string) {
+	a.mu.Lock()
+	delete(a.codes, code)
+	a.mu.Unlock()
 }
 
 // handleToken implements POST /token (grant_type=authorization_code + PKCE verify).
@@ -675,6 +749,23 @@ func (a *mcpAuthorizer) handleToken(w http.ResponseWriter, r *http.Request) {
 		delete(a.codes, code) // single-use
 	}
 	a.mu.Unlock()
+	if ok && ac.owner != "" {
+		// A copy of a code another replica issued. Two requests for it may be in
+		// flight on different replicas at once, each holding a copy, so the
+		// replica that issued it decides which one redeems it.
+		if a.claimCode == nil {
+			ok = false
+		} else if granted, err := a.claimCode(code, ac.owner); err != nil {
+			a.logger.Warn().Err(err).Str("owner", ac.owner).Msg("mesh: the replica that issued an authorization code could not be asked")
+			tokenErrorStatus(w, http.StatusServiceUnavailable, "temporarily_unavailable", "the code could not be confirmed; retry")
+			return
+		} else if !granted {
+			ok = false
+		}
+	}
+	if ok && a.dropCode != nil {
+		a.dropCode(code)
+	}
 
 	if !ok || time.Now().After(ac.expiresAt) {
 		tokenError(w, "invalid_grant", "code invalid or expired")
@@ -821,8 +912,12 @@ func writeJSON(w http.ResponseWriter, v any) {
 }
 
 func tokenError(w http.ResponseWriter, code, desc string) {
+	tokenErrorStatus(w, http.StatusBadRequest, code, desc)
+}
+
+func tokenErrorStatus(w http.ResponseWriter, status int, code, desc string) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusBadRequest)
+	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
 		"error":             code,
 		"error_description": desc,

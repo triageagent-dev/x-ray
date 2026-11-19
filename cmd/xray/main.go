@@ -41,7 +41,9 @@ import (
 	"github.com/triageagent-dev/x-ray/v2/internal/version"
 	"github.com/triageagent-dev/x-ray/v2/internal/webui"
 	"github.com/triageagent-dev/x-ray/v2/internal/xray"
+	"github.com/triageagent-dev/x-ray/v2/pkg/leaderlease"
 	"github.com/triageagent-dev/x-ray/v2/pkg/memstore/index"
+	"github.com/triageagent-dev/x-ray/v2/pkg/mesh"
 )
 
 func init() {
@@ -129,8 +131,15 @@ func main() {
 		mcpTokenTTL               time.Duration
 		mcpStaticClientID         string
 		mcpStaticClientRedirects  string
+		mcpMemberAccess           bool
 		episodicTTL               time.Duration
 		retentionSweepInterval    time.Duration
+		leaderElect               bool
+		leaderLeaseName           string
+		meshTLSDir                string
+		meshAddress               string
+		meshPort                  int
+		meshService               string
 		trustedProxyHops          int
 	)
 
@@ -199,6 +208,13 @@ func main() {
 	flag.DurationVar(&mcpTokenTTL, "mcp-token-ttl", 15*time.Minute, "Lifetime of issued MCP access tokens")
 	flag.StringVar(&mcpStaticClientID, "mcp-static-client-id", "", "Client ID of a pre-registered public MCP client (one that posts the code to its own https callback), with --mcp-oauth")
 	flag.StringVar(&mcpStaticClientRedirects, "mcp-static-client-redirect-uris", "", "Comma-separated redirect URIs of --mcp-static-client-id, matched exactly")
+	flag.BoolVar(&leaderElect, "leader-elect", false, "Elect one replica, with a Kubernetes Lease, to do the work that must run once: the sweeps that delete expired memory and the cell writes a reconcile makes back. Every replica serves requests either way. Set it when running more than one replica (needs the leases permission, ADR-068); with one replica it changes nothing")
+	flag.StringVar(&meshTLSDir, "mesh-tls-dir", "", "Directory holding ca.crt, tls.crt and tls.key: turns on the replica mesh, over which replicas share their counters, daily token spend, logins, OAuth client registrations and authorization codes (ADR-068). Empty = each replica counts alone")
+	flag.StringVar(&meshAddress, "mesh-address", ":8085", "Listen address of the replica mesh (with --mesh-tls-dir)")
+	flag.IntVar(&meshPort, "mesh-port", 8085, "Port the other replicas listen on, for dialing the addresses --mesh-service resolves to")
+	flag.StringVar(&meshService, "mesh-service", "", "DNS name of the headless Service over the replicas, e.g. xray-mesh.<namespace>.svc (with --mesh-tls-dir)")
+	flag.StringVar(&leaderLeaseName, "leader-lease-name", leaderlease.DefaultLeaseName, "Name of the Lease --leader-elect campaigns for, in --namespace")
+	flag.BoolVar(&mcpMemberAccess, "mcp-member-access", false, "With --mcp-oauth, let a signed-in non-admin use MCP: read shared memory and keep their own private notes (ADR 067)")
 	flag.DurationVar(&episodicTTL, "episodic-ttl", 7*24*time.Hour, "Max age of an episodic session memory before it is forgotten — dropped from get_recent_memory and deleted by the reaper (0 = never forget). See ADR-020")
 	flag.DurationVar(&retentionSweepInterval, "retention-sweep-interval", time.Hour, "How often the general retention sweep runs, hard-deleting memory items past their StaleAfter deadline (0 = disabled). Durable/config kinds (system_configuration, system_identity, policy, mental_map/map-carrying cells) and episodic memories (owned by --episodic-ttl instead) are exempt regardless of StaleAfter; an item with no StaleAfter set never expires.")
 	flag.IntVar(&trustedProxyHops, "trusted-proxy-hops", 0, "Number of trusted reverse proxies in front of the server (e.g. 1 for a single ingress/LB that appends the client IP). Controls how X-Forwarded-For is read for rate-limit keying: only this many entries from the right are trusted; 0 (default) ignores XFF and keys on the TCP peer address, which cannot be spoofed.")
@@ -367,6 +383,8 @@ func main() {
 
 	// k8s / controller-runtime setup — gracefully disabled when no kubeconfig available.
 	k8sCfg, cfgErr := ctrl.GetConfig()
+	var meshInst *mesh.Mesh
+	var meshSelf string // this replica's name on the mesh
 	if cfgErr != nil {
 		logger.Warn().Err(cfgErr).Msg("no k8s config — Secret watch and MemoryCell sync disabled")
 	} else {
@@ -394,7 +412,50 @@ func main() {
 		} else {
 			syncer := xray.NewCellSyncer(mgr.GetClient(), memory, logger)
 			syncer.SetRegistryPullSecret(registryPullSecret)
+			if leaderElect {
+				elector := leaderlease.New(leaderlease.Config{
+					RestConfig: k8sCfg,
+					Namespace:  namespace,
+					Name:       leaderLeaseName,
+					Logger:     logger,
+				})
+				// A replica that takes the lease writes back what the one before it
+				// left undone (a cell without a stored vector), so it re-runs the
+				// startup backfill, which skipped its writes while it was a follower.
+				elector.SetCallbacks(func() {
+					memory.FlushStats() // the leader writes the stats: write what has gathered
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+					defer cancel()
+					if err := syncer.SeedAll(ctx, namespace); err != nil {
+						logger.Warn().Err(err).Msg("MemoryCell backfill on taking the lease failed")
+					}
+				}, nil)
+				if err := mgr.Add(elector); err != nil {
+					logger.Fatal().Err(err).Msg("leader election: add to manager failed")
+				}
+				syncer.SetLeader(elector.IsLeader)
+				memory.SetLeader(elector.IsLeader)
+				logger.Info().Str("lease", leaderLeaseName).Msg("leader election on — one replica runs the sweeps and cell write-backs")
+			}
 			cellSyncer = syncer
+
+			if meshTLSDir != "" {
+				tc, err := mesh.LoadTLS(meshTLSDir)
+				if err != nil {
+					logger.Fatal().Err(err).Msg("--mesh-tls-dir")
+				}
+				self := os.Getenv("POD_NAME")
+				if self == "" {
+					self, _ = os.Hostname()
+				}
+				meshSelf = self
+				meshInst = mesh.New(mesh.Config{Self: self, Address: meshAddress, Port: meshPort, ServiceDNS: meshService, TLS: tc, Logger: logger})
+				memory.JoinMesh(meshInst, self, logger)
+				if !leaderElect {
+					logger.Warn().Msg("the replica mesh is on without --leader-elect: every replica writes the stats to the cell")
+				}
+				logger.Info().Str("self", self).Str("service", meshService).Msg("replica mesh on — counters, token spend, logins, OAuth clients and codes are shared")
+			}
 
 			// Let graph-carrying MemoryCells (Data["graph"], or Data["graphRef"] — a
 			// digest-pinned OCI artifact the server pulls) register as in-memory maps
@@ -608,6 +669,9 @@ func main() {
 			UICallbackOrigins: uiOrigins,
 		}),
 		xray.WithBasePath(xray.BasePath(publicURL)))
+	if meshInst != nil {
+		srv.JoinMesh(meshInst, meshSelf) // a sign-in may complete on any replica
+	}
 
 	if gcpProject != "" || geminiAPIKey != "" {
 		voiceLoc := voiceLocation
@@ -641,11 +705,15 @@ func main() {
 		if err != nil {
 			log.Fatal().Err(err).Msg("MCP authorizer init failed")
 		}
-		// MCP is admin-only: gate OAuth token issuance on the live writeAllowedUsers
+		// MCP is admin-only unless --mcp-member-access is set: gate OAuth token issuance on the live writeAllowedUsers
 		// allowlist (userHashes) from the system_configuration CR — same source the
 		// voice write-gate uses. Empty list ⇒ deny all (fail-closed); the static
 		// --mcp-token-secret bearer remains the out-of-band full-access admin path.
 		mcpAuth.SetAllowFn(func() []string { return configWatcher.Get().WriteAllowedUsers })
+		if meshInst != nil {
+			mcpAuth.JoinMesh(meshInst)
+		}
+		mcpAuth.SetMemberAccess(mcpMemberAccess)
 		if mcpStaticClientID != "" || mcpStaticClientRedirects != "" {
 			if err := mcpAuth.SetStaticClient(mcpStaticClientID, splitAndTrim(mcpStaticClientRedirects)); err != nil {
 				log.Fatal().Err(err).Msg("--mcp-static-client-id / --mcp-static-client-redirect-uris")
@@ -655,6 +723,15 @@ func main() {
 		mcpHandler := xray.NewMCPServer(memory, logger, func() string { return mcpTokenVal.Load().(string) }, mcpAuth, cellSyncer, namespace, memMapsDeps, mcpListMemoryMaxLimit, mcpSearchMemoryMaxLimit, mcpRecentMemoryMaxLimit)
 		srv.SetMCPAuth(mcpAuth, mcpHandler)
 		log.Info().Str("issuer", issuer).Str("resource", resourceURL).Bool("dev", dev).Msg("MCP OAuth enabled at /mcp (+ /.well-known, /authorize, /token)")
+	}
+
+	if meshInst != nil {
+		go func() {
+			if err := meshInst.Start(context.Background()); err != nil {
+				logger.Error().Err(err).Msg("replica mesh stopped")
+			}
+		}()
+		go memory.RunMesh(context.Background(), meshInst)
 	}
 
 	httpServer := &http.Server{

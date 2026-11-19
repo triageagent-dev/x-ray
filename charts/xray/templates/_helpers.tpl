@@ -4,10 +4,26 @@ flags by editing values.yaml. The only conditionals are the switches below
 (dev, voice.sessionResumption, voice.contextTriggerTokens and
 voice.contextTargetTokens), each appending one flag.
 */}}
+{{/* The replica mesh (ADR-068): on by itself above one replica, or with mesh.enabled. dig-safe: an upgrade with --reuse-values may carry values that predate the key. */}}
+{{- define "xray.mesh" -}}
+{{- $mesh := .Values.mesh | default dict -}}
+{{- if or $mesh.enabled (gt (int (.Values.replicaCount | default 1)) 1) }}true{{- end -}}
+{{- end -}}
+
 {{- define "xray.containerArgs" -}}
 {{- toYaml .Values.args }}
 {{- if .Values.dev }}
 - --dev
+{{- end }}
+{{- if or .Values.leaderElect (gt (int .Values.replicaCount) 1) }}
+- --leader-elect
+{{- end }}
+{{- if include "xray.mesh" . }}
+{{- $mesh := .Values.mesh | default dict }}
+- --mesh-tls-dir=/etc/xray/mesh-tls
+- --mesh-address=:{{ $mesh.port | default 8085 }}
+- --mesh-port={{ $mesh.port | default 8085 }}
+- --mesh-service={{ .Release.Name }}-mesh.{{ .Values.namespace }}.svc
 {{- end }}
 {{- if .Values.voice.sessionResumption }}
 - --voice-session-resumption
@@ -24,6 +40,11 @@ voice.contextTargetTokens), each appending one flag.
 xray container env, generated from values.
 */}}
 {{- define "xray.containerEnv" -}}
+# The Lease identity of --leader-elect: a pod's own name.
+- name: POD_NAME
+  valueFrom:
+    fieldRef:
+      fieldPath: metadata.name
 - name: POD_NAMESPACE
   valueFrom:
     fieldRef:
@@ -93,6 +114,10 @@ Container ports for the xray container, generated from values.
 {{- if .Values.metrics.enabled }}
 - name: metrics
   containerPort: {{ .Values.metrics.port }}
+{{- end }}
+{{- if include "xray.mesh" . }}
+- name: mesh
+  containerPort: {{ (.Values.mesh | default dict).port | default 8085 }}
 {{- end }}
 {{- end -}}
 

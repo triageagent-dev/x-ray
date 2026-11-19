@@ -357,6 +357,34 @@ func TestStateCookie_RejectsUnsignedValue(t *testing.T) {
 	assert.False(t, stateCookieMatches(r, "abc123"), "a value without a signature segment must be rejected")
 }
 
+// withSessionKey sets the session key main derives from the OAuth client secrets.
+func withSessionKey(t *testing.T, key string) {
+	t.Helper()
+	sessions.mu.Lock()
+	saved := sessions.hmacKey
+	sessions.hmacKey = []byte(key)
+	sessions.mu.Unlock()
+	t.Cleanup(func() {
+		sessions.mu.Lock()
+		sessions.hmacKey = saved
+		sessions.mu.Unlock()
+	})
+}
+
+func TestStateCookie_VerifiesOnAnotherReplicaWithTheSameSessionKey(t *testing.T) {
+	withSessionKey(t, "shared-secret")
+	r := reqWithStateCookie("a_abc123")
+
+	// Another replica: its own per-process key, the same session key.
+	saved := stateSigningKey
+	stateSigningKey = []byte("another replica's per-process key")
+	t.Cleanup(func() { stateSigningKey = saved })
+	assert.True(t, stateCookieMatches(r, "a_abc123"), "a state cookie issued on one replica verifies on another")
+
+	withSessionKey(t, "another-secret")
+	assert.False(t, stateCookieMatches(r, "a_abc123"), "a cookie signed under another session key is refused")
+}
+
 func TestStateCookie_SetCookieAttributes(t *testing.T) {
 	rec := httptest.NewRecorder()
 	setStateCookie(rec, "", "abc123")

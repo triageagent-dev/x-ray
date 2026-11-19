@@ -7,9 +7,11 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	mcell "github.com/triageagent-dev/x-ray/v2/api/v1"
+	"github.com/triageagent-dev/x-ray/v2/pkg/meshsync"
 )
 
 // Telemetry is what the server counts and persists about itself, apart from the
@@ -38,6 +40,18 @@ type Telemetry struct {
 	reader    client.Reader // non-nil when controller-runtime manager is available
 	writer    client.Client // non-nil when controller-runtime manager is available
 	namespace string
+
+	// fleet is set when this replica shares its counters with the others (ADR-068);
+	// nil when it counts alone.
+	fleet *fleetLedger
+	// leader says whether this replica writes the stats to the cell; nil means the
+	// only replica. Followers keep their counts, which the leader hears over the
+	// mesh, and leave the write to it.
+	leader func() bool
+	// seeded is set once the persisted counters have been taken back. With a fleet
+	// they are taken once: a later echo of the cell holds totals that already
+	// include what the peers sent, and applying it again would count them twice.
+	seeded atomic.Bool
 
 	// count and embedMetrics are read when the stats are flushed: how many
 	// memory cells there are, and the embedder's call and cache-hit counters.
@@ -79,16 +93,25 @@ type SearchMetrics struct {
 	SemanticFallbacks int64 `json:"semanticFallbacks"`
 }
 
+// fleetCounter is a count of the whole service. local is what this replica
+// counted itself, and fleet adds what the other replicas counted, so a read
+// answers for every replica and only local is sent to them.
+type fleetCounter struct{ local, fleet atomic.Int64 }
+
+func (c *fleetCounter) Add(n int64)   { c.local.Add(n); c.fleet.Add(n) }
+func (c *fleetCounter) Load() int64   { return c.fleet.Load() }
+func (c *fleetCounter) Store(n int64) { c.fleet.Store(n) }
+
 type searchCounters struct {
-	total         atomic.Int64
-	kwHits        atomic.Int64
-	kwVoiceHits   atomic.Int64
-	kwVoiceMisses atomic.Int64
-	kwTrigramHits atomic.Int64
-	semCalls      atomic.Int64
-	semFallbacks  atomic.Int64
-	voiceTotal    atomic.Int64
-	voiceActive   atomic.Int64
+	total         fleetCounter
+	kwHits        fleetCounter
+	kwVoiceHits   fleetCounter
+	kwVoiceMisses fleetCounter
+	kwTrigramHits fleetCounter
+	semCalls      fleetCounter
+	semFallbacks  fleetCounter
+	voiceTotal    fleetCounter
+	voiceActive   atomic.Int64 // sessions open on this replica: a level, not a count
 }
 
 // toolCallStat tracks invocation count and cumulative duration for one tool.
@@ -112,6 +135,16 @@ func (s *Telemetry) RestoreStats(st *mcell.RuntimeStats) {
 	if st == nil {
 		return
 	}
+	// With a fleet the counters and the token spend are taken back once, at start:
+	// what a later echo of the cell holds already includes what the peers sent.
+	if s.fleet == nil || !s.seeded.Swap(true) {
+		s.restoreCounters(st)
+	}
+	s.restoreShared(st)
+}
+
+// restoreCounters takes the persisted counters and daily token spend back.
+func (s *Telemetry) restoreCounters(st *mcell.RuntimeStats) {
 	s.counters.total.Store(st.SearchTotal)
 	s.counters.kwHits.Store(st.KeywordHits)
 	s.counters.kwVoiceHits.Store(st.KWVoiceHits)
@@ -144,7 +177,11 @@ func (s *Telemetry) RestoreStats(st *mcell.RuntimeStats) {
 		s.usage[ud.UserHash] = &userDaily{day: ud.Day, tokens: ud.Tokens}
 	}
 	s.usageMu.Unlock()
+}
 
+// restoreShared takes the sessions and the OAuth client registrations back; it
+// runs on every echo of the cell, and never lowers or replaces what is held.
+func (s *Telemetry) restoreShared(st *mcell.RuntimeStats) {
 	// Rehydrate persisted sessions so logins survive a restart and propagate across
 	// replicas via this same watch event. restoreSessions merges in (never clobbers
 	// a live entry) and prunes expired rows, mirroring the UserDaily merge above.
@@ -173,6 +210,14 @@ func (s *Telemetry) AddUserTokens(userHash string, n int64) {
 	if userHash == "" || n <= 0 {
 		return
 	}
+	s.addTokens(userHash, n)
+	if f := s.fleet; f != nil {
+		f.publish([]meshsync.Record{f.sync.Own(meshsync.Record{Family: famSpend, Name: userHash, Start: dayStartOf(time.Now()), Vals: []int64{n}})})
+	}
+}
+
+// addTokens adds n to the person's count of today, whoever spent them.
+func (s *Telemetry) addTokens(userHash string, n int64) {
 	today := utcDay()
 	s.usageMu.Lock()
 	u, ok := s.usage[userHash]
@@ -330,13 +375,15 @@ func (s *Telemetry) StartStatsFlusher(ctx context.Context, every time.Duration) 
 			select {
 			case <-ctx.Done():
 				// Final flush so a login/voice/search in the last window survives.
-				if s.statsDirty.Swap(false) {
+				if s.leads() && s.statsDirty.Swap(false) {
 					s.flushStats()
 				}
 				return
 			case <-t.C:
-				// Only write when something changed — idle pods make no etcd writes.
-				if s.statsDirty.Swap(false) {
+				// Only write when something changed — idle pods make no etcd writes —
+				// and only the leader writes: the others' counts, sessions and clients
+				// reach it over the mesh (ADR-068).
+				if s.leads() && s.statsDirty.Swap(false) {
 					s.flushStats()
 				}
 			}
@@ -387,8 +434,54 @@ func (s *Telemetry) flushStats() {
 		return
 	}
 	cell = cell.DeepCopy()
+	if s.fleet != nil {
+		// A leader that has just taken over holds counts from before the one it
+		// follows wrote its last: never write less than the cell has.
+		mergeWithPersisted(stats, cell.Status.Stats)
+	}
 	cell.Status.Stats = stats
 	if err := w.Status().Update(ctx, cell); err != nil {
 		s.logger.Warn().Err(err).Msg("flushStats: status update failed")
+		return
+	}
+	if totals := mergeSavedTotals(cell.Spec.Data[meshTotalsKey].Bytes, s.meshTotals(time.Now()), time.Now()); totals != "" && totals != cell.Spec.Data[meshTotalsKey].Bytes {
+		if cell.Spec.Data == nil {
+			cell.Spec.Data = map[string]mcell.DataEntry{}
+		}
+		cell.Spec.Data[meshTotalsKey] = mcell.DataEntry{Bytes: totals, Mime: "application/json"}
+		if err := w.Update(ctx, cell); err != nil && !apierrors.IsConflict(err) {
+			s.logger.Warn().Err(err).Msg("flushStats: mesh totals update failed")
+		}
+	}
+}
+
+// mergeWithPersisted raises each counter and each person's spend of today in out
+// to what prev holds, when prev holds more.
+func mergeWithPersisted(out, prev *mcell.RuntimeStats) {
+	if prev == nil {
+		return
+	}
+	out.VoiceTotal = max(out.VoiceTotal, prev.VoiceTotal)
+	out.SearchTotal = max(out.SearchTotal, prev.SearchTotal)
+	out.KeywordHits = max(out.KeywordHits, prev.KeywordHits)
+	out.KWVoiceHits = max(out.KWVoiceHits, prev.KWVoiceHits)
+	out.KWVoiceMisses = max(out.KWVoiceMisses, prev.KWVoiceMisses)
+	out.KWTrigramHits = max(out.KWTrigramHits, prev.KWTrigramHits)
+	out.SemanticCalls = max(out.SemanticCalls, prev.SemanticCalls)
+	out.SemanticFallbacks = max(out.SemanticFallbacks, prev.SemanticFallbacks)
+	today := utcDay()
+	byUser := make(map[string]int, len(out.UserDaily))
+	for i, u := range out.UserDaily {
+		byUser[u.UserHash] = i
+	}
+	for _, u := range prev.UserDaily {
+		if u.Day != today || u.UserHash == "" {
+			continue
+		}
+		if i, ok := byUser[u.UserHash]; ok {
+			out.UserDaily[i].Tokens = max(out.UserDaily[i].Tokens, u.Tokens)
+		} else {
+			out.UserDaily = append(out.UserDaily, u)
+		}
 	}
 }

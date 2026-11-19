@@ -1,0 +1,24 @@
+{{- /* Headless Service for the replica mesh (ADR-068): it resolves to the individual
+pod IPs, which is the peer set. Rendered whenever the mesh is on. */}}
+{{- if include "xray.mesh" . }}
+{{- $mesh := .Values.mesh | default dict }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-mesh
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: {{ .Release.Name }}
+    app.kubernetes.io/component: mesh
+spec:
+  clusterIP: None
+  # A starting replica must find its peers, and be found, before it is ready.
+  publishNotReadyAddresses: true
+  selector:
+    app: {{ .Release.Name }}
+  ports:
+    - name: mesh
+      port: {{ $mesh.port | default 8085 }}
+      targetPort: mesh
+      protocol: TCP
+{{- end }}
