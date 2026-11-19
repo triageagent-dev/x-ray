@@ -40,6 +40,9 @@ type googleAuth struct {
 	tokenURL string
 	statesMu sync.Mutex
 	states   map[string]loginState
+	// self prefixes the states minted here; claim asks the replica a state names (ADR-068). Unset without a mesh.
+	self  string
+	claim func(owner, state string) (loginState, bool)
 }
 
 func newGoogleAuth(cfg GoogleOAuthConfig) *googleAuth {
@@ -67,6 +70,9 @@ func (g *googleAuth) newState(uiOrigin string) string {
 		panic("crypto/rand failed: " + err.Error())
 	}
 	state := hex.EncodeToString(b)
+	if g.self != "" {
+		state = g.self + "_" + state
+	}
 	g.statesMu.Lock()
 	g.states[state] = loginState{expiresAt: time.Now().Add(10 * time.Minute), uiOrigin: uiOrigin}
 	g.statesMu.Unlock()
@@ -113,6 +119,9 @@ func (g *googleAuth) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	st, stateOK := g.consumeState(state)
+	if !stateOK {
+		st, stateOK = claimElsewhere(g.self, g.claim, state)
+	}
 	if !stateOK {
 		http.Error(w, "invalid state", http.StatusBadRequest)
 		return

@@ -70,6 +70,8 @@ copy for these has the same behaviour pinned.
      the cell holds, a logout as a drop, so the next request may land on any replica without waiting for a flush.
    - **MCP authorization codes.** `/authorize` answers once the peers acknowledge the code, because the client's
      next call is `/token` and the Service may route it to any replica; a redeemed code is dropped everywhere.
+   - **Sign-ins.** A sign-in started on one replica is completed by asking that replica, which its state names, as
+     for codes; the state key is derived from the OAuth secret. If it cannot be asked, the person signs in again.
    With the mesh carrying everything the stats flush held, the flush is leader-only: the leader writes the
    counters, the sessions and the clients, never less than the cell already has, and a replica that takes the
    lease marks the stats dirty so it writes at once. The persisted counters are taken back once at start; with a

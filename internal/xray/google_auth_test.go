@@ -242,6 +242,11 @@ func TestGoogleCallback_RefusesStateNotBoundToCookie(t *testing.T) {
 	assert.Nil(t, sessionCookie(w))
 }
 
+func TestGoogleLogin_StateNamesNoReplicaWithoutAMesh(t *testing.T) {
+	_, state, _ := googleLogin(t, tokenReply(t, ""), "")
+	assert.Regexp(t, `^[0-9a-f]{32}$`, state, "without a mesh the state is as before")
+}
+
 func TestGoogleCallback_TokenEndpointFailures(t *testing.T) {
 	cases := map[string]http.HandlerFunc{
 		"oauth error": func(w http.ResponseWriter, _ *http.Request) {

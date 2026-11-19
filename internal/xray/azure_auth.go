@@ -29,6 +29,9 @@ type azureAuth struct {
 	cfg      AzureOAuthConfig
 	statesMu sync.Mutex
 	states   map[string]loginState
+	// self prefixes the states minted here; claim asks the replica a state names (ADR-068). Unset without a mesh.
+	self  string
+	claim func(owner, state string) (loginState, bool)
 }
 
 func newAzureAuth(cfg AzureOAuthConfig) *azureAuth {
@@ -58,6 +61,9 @@ func (a *azureAuth) newState(uiOrigin string) string {
 		panic("crypto/rand failed: " + err.Error())
 	}
 	state := hex.EncodeToString(b)
+	if a.self != "" {
+		state = a.self + "_" + state
+	}
 	a.statesMu.Lock()
 	a.states[state] = loginState{expiresAt: time.Now().Add(10 * time.Minute), uiOrigin: uiOrigin}
 	a.statesMu.Unlock()
@@ -104,6 +110,9 @@ func (a *azureAuth) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	st, stateOK := a.consumeState(state)
+	if !stateOK {
+		st, stateOK = claimElsewhere(a.self, a.claim, state)
+	}
 	if !stateOK {
 		http.Error(w, "invalid state", http.StatusBadRequest)
 		return

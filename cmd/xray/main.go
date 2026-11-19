@@ -384,6 +384,7 @@ func main() {
 	// k8s / controller-runtime setup — gracefully disabled when no kubeconfig available.
 	k8sCfg, cfgErr := ctrl.GetConfig()
 	var meshInst *mesh.Mesh
+	var meshSelf string // this replica's name on the mesh
 	if cfgErr != nil {
 		logger.Warn().Err(cfgErr).Msg("no k8s config — Secret watch and MemoryCell sync disabled")
 	} else {
@@ -447,6 +448,7 @@ func main() {
 				if self == "" {
 					self, _ = os.Hostname()
 				}
+				meshSelf = self
 				meshInst = mesh.New(mesh.Config{Self: self, Address: meshAddress, Port: meshPort, ServiceDNS: meshService, TLS: tc, Logger: logger})
 				memory.JoinMesh(meshInst, self, logger)
 				if !leaderElect {
@@ -667,6 +669,9 @@ func main() {
 			UICallbackOrigins: uiOrigins,
 		}),
 		xray.WithBasePath(xray.BasePath(publicURL)))
+	if meshInst != nil {
+		srv.JoinMesh(meshInst, meshSelf) // a sign-in may complete on any replica
+	}
 
 	if gcpProject != "" || geminiAPIKey != "" {
 		voiceLoc := voiceLocation
