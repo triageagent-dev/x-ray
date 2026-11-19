@@ -29,6 +29,7 @@ const (
 	frameCode        = "auth_code"
 	frameCodeRedeem  = "auth_code_redeemed"
 	frameCodeClaim   = "auth_code_claim" // a request: the issuing replica decides who redeems a code
+	frameLoginClaim  = "login_state"     // a request: the replica that started a sign-in completes it
 	codeShareTimeout = time.Second
 )
 
@@ -212,4 +213,51 @@ func (a *mcpAuthorizer) JoinMesh(mm *mesh.Mesh) {
 			a.forgetCode(code)
 		}
 	})
+}
+
+type loginClaim struct {
+	Provider string `json:"provider"`
+	State    string `json:"state"`
+}
+
+type loginClaimReply struct {
+	OK        bool   `json:"ok"`
+	UIOrigin  string `json:"uiOrigin,omitempty"`
+	ExpiresAt int64  `json:"expiresAt,omitempty"` // unix seconds
+}
+
+// JoinMesh lets a sign-in started on this replica complete on another: the
+// provider's callback may reach any replica, which asks the one the state names.
+// Call before the mesh starts.
+func (s *Server) JoinMesh(mm *mesh.Mesh, self string) {
+	joinLoginMesh(mm, self, s.logger, s.google, s.github, s.azure)
+}
+
+func joinLoginMesh(mm *mesh.Mesh, self string, logger zerolog.Logger, g *googleAuth, gh *githubAuth, az *azureAuth) {
+	consume := map[string]func(string) (loginState, bool){"google": g.consumeState, "github": gh.consumeState, "entra": az.consumeState}
+	mm.HandleRequest(frameLoginClaim, func(_ string, data json.RawMessage) any {
+		var c loginClaim
+		if json.Unmarshal(data, &c) != nil || consume[c.Provider] == nil {
+			return loginClaimReply{}
+		}
+		st, ok := consume[c.Provider](c.State) // single use: the first replica to ask gets it
+		return loginClaimReply{OK: ok, UIOrigin: st.uiOrigin, ExpiresAt: st.expiresAt.Unix()}
+	})
+	claim := func(provider string) func(owner, state string) (loginState, bool) {
+		return func(owner, state string) (loginState, bool) {
+			ctx, cancel := context.WithTimeout(context.Background(), codeShareTimeout*2)
+			defer cancel()
+			var r loginClaimReply
+			if err := mm.Request(ctx, owner, frameLoginClaim, loginClaim{Provider: provider, State: state}, &r); err != nil || !r.OK {
+				if err != nil {
+					logger.Warn().Err(err).Str("owner", owner).Msg("mesh: the replica that started a sign-in could not be asked; the user signs in again")
+				}
+				return loginState{}, false // the owner is gone or refused: sign in again
+			}
+			return loginState{expiresAt: time.Unix(r.ExpiresAt, 0), uiOrigin: r.UIOrigin}, true
+		}
+	}
+	g.self, g.claim = self, claim("google")
+	gh.self, gh.claim = self, claim("github")
+	az.self, az.claim = self, claim("entra")
 }

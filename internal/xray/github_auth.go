@@ -30,6 +30,9 @@ type githubAuth struct {
 	cfg      GitHubOAuthConfig
 	statesMu sync.Mutex
 	states   map[string]loginState // state → in-flight login
+	// self prefixes the states minted here; claim asks the replica a state names (ADR-068). Unset without a mesh.
+	self  string
+	claim func(owner, state string) (loginState, bool)
 }
 
 func newGitHubAuth(cfg GitHubOAuthConfig) *githubAuth {
@@ -62,6 +65,9 @@ func (g *githubAuth) newState(uiOrigin string) string {
 		panic("crypto/rand failed: " + err.Error())
 	}
 	state := hex.EncodeToString(b)
+	if g.self != "" {
+		state = g.self + "_" + state
+	}
 	g.statesMu.Lock()
 	g.states[state] = loginState{expiresAt: time.Now().Add(10 * time.Minute), uiOrigin: uiOrigin}
 	g.statesMu.Unlock()
@@ -112,6 +118,9 @@ func (g *githubAuth) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 	// Validate state — consume it atomically so it can't be replayed.
 	st, stateOK := g.consumeState(state)
+	if !stateOK {
+		st, stateOK = claimElsewhere(g.self, g.claim, state)
+	}
 	if !stateOK {
 		http.Error(w, "invalid state", http.StatusBadRequest)
 		return

@@ -434,3 +434,59 @@ func TestReplicas_AForgedAuthorizationCodeIsDropped(t *testing.T) {
 	assert.NotContains(t, a.codes, "evil")
 	assert.NotContains(t, a.codes, "evil2")
 }
+
+// googleReplica is a Google sign-in on a replica that joined mesh mm as self,
+// against the token endpoint at tokenURL.
+func googleReplica(mm *mesh.Mesh, self, tokenURL string) *googleAuth {
+	g := newTestGoogleAuth(tokenURL)
+	joinLoginMesh(mm, self, zerolog.Nop(), g, newGitHubAuth(GitHubOAuthConfig{}), newAzureAuth(AzureOAuthConfig{}))
+	return g
+}
+
+func googleStart(t *testing.T, g *googleAuth) (string, []*http.Cookie) {
+	t.Helper()
+	w := httptest.NewRecorder()
+	g.handleLogin(w, httptest.NewRequest(http.MethodGet, "/v1/auth/google", nil))
+	loc, err := url.Parse(w.Header().Get("Location"))
+	require.NoError(t, err)
+	return loc.Query().Get("state"), w.Result().Cookies()
+}
+
+func TestReplicas_ASignInStartedOnOneReplicaCompletesOnTheOther(t *testing.T) {
+	withSessionKey(t, "shared-secret")
+	tokenSrv := httptest.NewServer(tokenReply(t, googleTestToken(t, workspaceClaims())))
+	t.Cleanup(tokenSrv.Close)
+	ma, mb := meshtest.Pair(t)
+	a, b := googleReplica(ma, "a", tokenSrv.URL), googleReplica(mb, "b", tokenSrv.URL)
+	meshtest.Run(t, ma, mb)
+
+	state, cookies := googleStart(t, a)
+	assert.True(t, strings.HasPrefix(state, "a_"), "the state names the replica that started the sign-in")
+
+	w := googleReturn(b, state, cookies)
+	require.Equal(t, http.StatusFound, w.Code, w.Body.String())
+	assert.NotNil(t, sessionCookie(w))
+
+	again := googleReturn(b, state, cookies)
+	assert.Equal(t, http.StatusBadRequest, again.Code, "a sign-in completes once across replicas")
+	assert.Nil(t, sessionCookie(again))
+}
+
+func TestReplicas_ASignInWhoseOwnerCannotBeAskedIsRefused(t *testing.T) {
+	withSessionKey(t, "shared-secret")
+	tokenSrv := httptest.NewServer(tokenReply(t, googleTestToken(t, workspaceClaims())))
+	t.Cleanup(tokenSrv.Close)
+	ma, mb := meshtest.Pair(t)
+	googleReplica(ma, "a", tokenSrv.URL)
+	b := googleReplica(mb, "b", tokenSrv.URL)
+	meshtest.Run(t, ma, mb)
+
+	// Started on "gone", which b is not connected to.
+	gone := newTestGoogleAuth(tokenSrv.URL)
+	gone.self = "gone"
+	state, cookies := googleStart(t, gone)
+
+	w := googleReturn(b, state, cookies)
+	assert.Equal(t, http.StatusBadRequest, w.Code, "the person signs in again")
+	assert.Nil(t, sessionCookie(w))
+}

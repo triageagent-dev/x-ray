@@ -35,9 +35,10 @@ func stableUserID(raw string) string {
 // their own authorization code into a victim's browser.
 const oauthStateCookie = "xray_oauth_state"
 
-// stateSigningKey is generated once per process. State values are short-lived
-// (10 min) and single-use, so a per-process key is sufficient — a restart simply
-// invalidates any login in flight, which is harmless.
+// stateSigningKey is generated once per process and signs the state cookie when
+// no session key is set (see stateKey). A restart invalidates any login in flight,
+// which is harmless; another replica could not verify it, so with more than one
+// replica the key is derived from the session key instead.
 var stateSigningKey = func() []byte {
 	k := make([]byte, 32)
 	if _, err := rand.Read(k); err != nil {
@@ -46,10 +47,22 @@ var stateSigningKey = func() []byte {
 	return k
 }()
 
+// stateKey signs the state cookie. With the session key set (ADR-047) it is derived
+// from it, so a sign-in started on one replica verifies on another (ADR-068).
+func stateKey() []byte {
+	sessions.mu.Lock()
+	defer sessions.mu.Unlock()
+	if len(sessions.hmacKey) == 0 {
+		return stateSigningKey
+	}
+	k := sha256.Sum256(append(append([]byte(nil), sessions.hmacKey...), "oauth-state"...))
+	return k[:]
+}
+
 // signState returns "<state>.<hex-hmac>" so the callback can verify the cookie
 // was issued by this server and not forged or tampered with.
 func signState(state string) string {
-	mac := hmac.New(sha256.New, stateSigningKey)
+	mac := hmac.New(sha256.New, stateKey())
 	mac.Write([]byte(state))
 	return state + "." + hex.EncodeToString(mac.Sum(nil))
 }
@@ -96,7 +109,7 @@ func stateCookieMatches(r *http.Request, queryState string) bool {
 	if !ok {
 		return false
 	}
-	mac := hmac.New(sha256.New, stateSigningKey)
+	mac := hmac.New(sha256.New, stateKey())
 	mac.Write([]byte(state))
 	want := mac.Sum(nil)
 	got, err := hex.DecodeString(sig)
@@ -642,6 +655,17 @@ type loginState struct {
 	// callback completes. Empty — the default — redirects to "/" on this host,
 	// which is the same-origin case where the cookie is the whole credential.
 	uiOrigin string
+}
+
+// claimElsewhere completes a sign-in this replica does not hold by asking the one
+// that started it, named before the "_" in the state (ADR-068). The state cookie
+// is checked first and signs the state, so the name cannot be altered.
+func claimElsewhere(self string, claim func(owner, state string) (loginState, bool), state string) (loginState, bool) {
+	owner, _, ok := strings.Cut(state, "_")
+	if !ok || claim == nil || owner == self {
+		return loginState{}, false
+	}
+	return claim(owner, state)
 }
 
 // resolveUIOrigin validates a requested `?ui=` origin against the configured
