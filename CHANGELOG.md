@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- **`google:*@<domain>` in `--access-users` or `--access-admins` names every Google account of `--google-domain` (ADR-066).** With `--access-admins` set only listed principals sign in, so a deployment could not admit its whole Workspace while naming the admins by address. In `--access-users` the entry admits every account as a member and the admins stay named; in `--access-admins` it makes every account an admin. It must carry the `--google-domain` domain and matches Google sessions only. Without it nothing changes.
+
 ## [2.10.0] - 2026-11-19
 
 ### Added

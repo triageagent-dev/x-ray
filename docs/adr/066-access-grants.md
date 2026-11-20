@@ -27,6 +27,11 @@ configuration, never from code. They work for every sign-in provider:
     list (and signs in as before when no list is set). A Google session's
     name is the full address so the list can match it; reassigning an address inside Workspace
     moves its access with it.
+  - `google:*@<domain>`: every Google account of `--google-domain`, in either list. In
+    `--access-users` it admits the whole Workspace as members while `--access-admins` names the
+    admins; in `--access-admins` it makes every such account an admin, a deliberate configuration
+    choice. The local part must be exactly `*`; any other `*` fails start-up. It matches Google
+    sessions only.
   - `github:<numeric user id>`: digits only. A GitHub login can be renamed and the old one
     re-registered by someone else; the numeric id never is. The session id is `github:<id>`.
   - `azure:<object id>`: the Entra object id, a GUID, lower-cased. A UPN can be changed or reused;
@@ -65,6 +70,8 @@ the lists would stay as break-glass and fallback. It needs its own design before
   matches no list and signs in again. The callbacks of GitHub and Entra call hard-coded provider
   URLs, so the new 403 is covered by the matching unit tests of the grant check, not by a
   callback test.
+- `google:*@<domain>` matches only sessions named by a full address, so a legacy local-part session
+  matches it no more than a list.
 
 These lists decide access to one instance: who signs in and who is an admin. They are not the core's tenant visibility and grants, which X-Ray does not take (ADR-053), so an instance remains one access boundary.
 

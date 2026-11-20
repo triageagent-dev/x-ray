@@ -335,3 +335,57 @@ func TestNewAccessGrants_BlankListFailsClosed(t *testing.T) {
 	_, err := NewAccessGrants("", "  ", "example.com")
 	assert.NoError(t, err, "an unset or whitespace-only value is an empty list")
 }
+
+func TestNewAccessGrants_DomainEntry(t *testing.T) {
+	g, err := NewAccessGrants("Google:*@Example.com", "google:*@example.com", "example.com")
+	require.NoError(t, err)
+	assert.NoError(t, g.RequireProviders(true, false, false))
+	assert.Error(t, g.RequireProviders(false, true, true), "the domain entry is a google principal")
+
+	_, err = NewAccessGrants("google:*@other.test", "", "example.com")
+	assert.Error(t, err, "another domain")
+	_, err = NewAccessGrants("", "google:*@example.com", "")
+	assert.Error(t, err, "needs --google-domain")
+	for _, bad := range []string{"google:a*@example.com", "google:*a@example.com", "google:**@example.com", "*", "google:*", "google:*@sub.example.com"} {
+		_, err = NewAccessGrants(bad, "", "example.com")
+		assert.Error(t, err, "users: %q", bad)
+		_, err = NewAccessGrants("", bad, "example.com")
+		assert.Error(t, err, "admins: %q", bad)
+	}
+}
+
+func TestAccessGrants_DomainEntryAdmitsWorkspaceMembers(t *testing.T) {
+	withGrants(t, "google:*@example.com", "google:boss@example.com")
+	g := grants
+	assert.True(t, g.allowsUser("google:1", "someone@example.com"))
+	assert.True(t, g.allowsUser("google:1", "Someone@Example.com"))
+	assert.False(t, g.isAdmin("google:1", "someone@example.com"), "the entry in users grants no admin")
+	assert.True(t, g.allowsUser("google:2", "boss@example.com"))
+	assert.True(t, g.isAdmin("google:2", "boss@example.com"))
+	assert.False(t, g.allowsUser("google:3", "someone@other.test"))
+	assert.False(t, g.allowsUser("github:42", "someone@example.com"), "a GitHub session is never matched by it")
+	assert.False(t, g.allowsUser("azure:"+oidA, "someone@example.com"), "an Entra session is never matched by it")
+	assertNoDomainMatch(t, g)
+}
+
+func TestAccessGrants_DomainEntryInAdminsMakesEveryAccountAdmin(t *testing.T) {
+	withGrants(t, "", "google:*@example.com")
+	g := grants
+	assert.True(t, g.allowsUser("google:1", "someone@example.com"))
+	assert.True(t, g.isAdmin("google:1", "someone@example.com"))
+	assert.False(t, g.isAdmin("google:3", "someone@other.test"))
+	assert.False(t, g.isAdmin("github:42", "someone@example.com"))
+	assert.False(t, g.isAdmin("azure:"+oidA, "someone@example.com"))
+	assertNoDomainMatch(t, g)
+	for _, name := range []string{"legacy", "", "a@b@example.com", "*@example.com"} {
+		assert.False(t, g.isAdmin("google:5", name), "admin: %q", name)
+	}
+}
+
+// Names that are not a full Workspace address must match nothing and never panic.
+func assertNoDomainMatch(t *testing.T, g AccessGrants) {
+	t.Helper()
+	for _, name := range []string{"legacy", "", "a@b@example.com", "*@example.com", "s\u00f6meone@example.com"} {
+		assert.False(t, g.allowsUser("google:5", name), "allowsUser: %q", name)
+	}
+}

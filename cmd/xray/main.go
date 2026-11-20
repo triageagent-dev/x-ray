@@ -198,7 +198,7 @@ func main() {
 	flag.StringVar(&googleClientID, "google-client-id", "", "Google OAuth client ID")
 	flag.StringVar(&googleClientSecret, "google-client-secret", "", "Google OAuth client secret")
 	flag.StringVar(&googleDomain, "google-domain", "", "Required Google Workspace domain (the ID token's hd claim) for access")
-	flag.StringVar(&accessUsers, "access-users", "", "Comma-separated principals that may sign in, with any provider: google:<address> (in --google-domain), github:<numeric user id>, azure:<Entra object id>. With this or --access-admins set, only listed principals sign in; with neither, anyone the provider admits")
+	flag.StringVar(&accessUsers, "access-users", "", "Comma-separated principals that may sign in, with any provider: google:<address> (in --google-domain), google:*@<domain> (every account of --google-domain), github:<numeric user id>, azure:<Entra object id>. With this or --access-admins set, only listed principals sign in; with neither, anyone the provider admits")
 	flag.StringVar(&accessAdmins, "access-admins", "", "Comma-separated principals, in the same forms as --access-users, granted the admin interface (MCP token, voice writes); they may also sign in")
 	flag.BoolVar(&webUI, "ui", true, "Serve the embedded web UI at / (when this binary was built with one)")
 	flag.BoolVar(&dev, "dev", false, "Dev mode: disable auth requirement and allow all CORS origins")

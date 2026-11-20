@@ -26,7 +26,7 @@ var grants AccessGrants
 // SetAccessGrants installs the grants. Call before serving.
 func SetAccessGrants(g AccessGrants) { grants = g }
 
-const principalForms = "google:<address>, github:<numeric user id>, azure:<object id>"
+const principalForms = "google:<address>, google:*@<domain>, github:<numeric user id>, azure:<object id>"
 
 var azureOID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
@@ -91,6 +91,9 @@ func parsePrincipal(e, domain string) (string, error) {
 		if host != domain {
 			return "", fmt.Errorf("%q is outside the Workspace domain %s", e, domain)
 		}
+		if strings.Contains(local, "*") && local != "*" {
+			return "", fmt.Errorf("%q: only google:*@%s may use *; use one of %s", e, domain, principalForms)
+		}
 	case "github":
 		if id == "" || strings.Trim(id, "0123456789") != "" {
 			return "", fmt.Errorf("%q is not a numeric GitHub user id; use one of %s", e, principalForms)
@@ -144,12 +147,22 @@ func (g AccessGrants) allowsUser(userID, username string) bool {
 		return true
 	}
 	p := principalOf(userID, username)
-	return slices.Contains(g.users, p) || slices.Contains(g.admins, p)
+	return listHas(g.users, p) || listHas(g.admins, p)
+}
+
+// listHas reports whether a list names the principal: exactly, or for a Google
+// address through google:*@<domain>, which names every account of the domain.
+func listHas(list []string, p string) bool {
+	local, host, ok := strings.Cut(strings.TrimPrefix(p, "google:"), "@")
+	if strings.HasPrefix(p, "google:") && ok && local == "*" {
+		return false // a session named like the entry is not a real address
+	}
+	return slices.Contains(list, p) || strings.HasPrefix(p, "google:") && ok && local != "" && slices.Contains(list, "google:*@"+host)
 }
 
 // isAdmin reports whether a session gets the admin interface by principal.
 func (g AccessGrants) isAdmin(userID, username string) bool {
-	return slices.Contains(g.admins, principalOf(userID, username))
+	return listHas(g.admins, principalOf(userID, username))
 }
 
 // voiceWriters is the voice write allowlist for one session: the configuration
