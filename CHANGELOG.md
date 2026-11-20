@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **The memory map no longer crashes the page when a recall lights cells.** The production build dropped `d3-transition`, so `selection.interrupt()` and `.transition()` did not exist and a hit threw `a.interrupt is not a function`. The map now imports `d3-transition` explicitly (`d3` is `sideEffects: false`), and it is a direct dependency of the UI.
+
 ## [2.10.0] - 2026-11-19
 
 ### Added

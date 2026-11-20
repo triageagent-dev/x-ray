@@ -4,6 +4,9 @@ import { useEffect, useRef, useState, useCallback, useMemo } from "react"
 import { useRouter } from "next/navigation"
 import * as d3 from "d3"
 import { Delaunay } from "d3-delaunay"
+// Side-effect import: adds selection.transition()/interrupt() to d3-selection. The "d3" barrel is
+// sideEffects:false and nothing here reads its transition export, so the bundler drops it.
+import "d3-transition"
 import { BrainCog, RefreshCw } from "lucide-react"
 import { fetchMemorySummary, fetchMemorySearch, subscribeMemoryEvents, type MemoryItemSummary } from "@/lib/api"
 import { cn } from "@/lib/utils"
