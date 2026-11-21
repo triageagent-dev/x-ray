@@ -337,7 +337,7 @@ func TestNewAccessGrants_BlankListFailsClosed(t *testing.T) {
 }
 
 func TestNewAccessGrants_DomainEntry(t *testing.T) {
-	g, err := NewAccessGrants("Google:*@Example.com", "google:*@example.com", "example.com")
+	g, err := NewAccessGrants("Google:*@Example.com", "google:boss@example.com", "example.com")
 	require.NoError(t, err)
 	assert.NoError(t, g.RequireProviders(true, false, false))
 	assert.Error(t, g.RequireProviders(false, true, true), "the domain entry is a google principal")
@@ -352,6 +352,10 @@ func TestNewAccessGrants_DomainEntry(t *testing.T) {
 		_, err = NewAccessGrants("", bad, "example.com")
 		assert.Error(t, err, "admins: %q", bad)
 	}
+	_, err = NewAccessGrants("", "google:*@example.com", "example.com")
+	assert.Error(t, err, "the domain entry is for --access-users only: admins are named one by one")
+	_, err = NewAccessGrants("google:*@example.com", "google:*@example.com", "example.com")
+	assert.Error(t, err, "and still refused when the users list holds it too")
 }
 
 func TestAccessGrants_DomainEntryAdmitsWorkspaceMembers(t *testing.T) {
@@ -368,18 +372,13 @@ func TestAccessGrants_DomainEntryAdmitsWorkspaceMembers(t *testing.T) {
 	assertNoDomainMatch(t, g)
 }
 
-func TestAccessGrants_DomainEntryInAdminsMakesEveryAccountAdmin(t *testing.T) {
-	withGrants(t, "", "google:*@example.com")
+func TestAccessGrants_DomainEntryNeverMakesAnAdmin(t *testing.T) {
+	withGrants(t, "google:*@example.com", "")
 	g := grants
 	assert.True(t, g.allowsUser("google:1", "someone@example.com"))
-	assert.True(t, g.isAdmin("google:1", "someone@example.com"))
-	assert.False(t, g.isAdmin("google:3", "someone@other.test"))
-	assert.False(t, g.isAdmin("github:42", "someone@example.com"))
-	assert.False(t, g.isAdmin("azure:"+oidA, "someone@example.com"))
+	assert.False(t, g.isAdmin("google:1", "someone@example.com"), "the entry in users grants no admin")
+	assert.False(t, g.isAdmin("google:1", "*@example.com"), "nor does a session named like the entry")
 	assertNoDomainMatch(t, g)
-	for _, name := range []string{"legacy", "", "a@b@example.com", "*@example.com"} {
-		assert.False(t, g.isAdmin("google:5", name), "admin: %q", name)
-	}
 }
 
 // Names that are not a full Workspace address must match nothing and never panic.

@@ -27,11 +27,11 @@ configuration, never from code. They work for every sign-in provider:
     list (and signs in as before when no list is set). A Google session's
     name is the full address so the list can match it; reassigning an address inside Workspace
     moves its access with it.
-  - `google:*@<domain>`: every Google account of `--google-domain`, in either list. In
-    `--access-users` it admits the whole Workspace as members while `--access-admins` names the
-    admins; in `--access-admins` it makes every such account an admin, a deliberate configuration
-    choice. The local part must be exactly `*`; any other `*` fails start-up. It matches Google
-    sessions only.
+  - `google:*@<domain>`: every Google account of `--google-domain`, in `--access-users` only. It admits
+    the whole Workspace as members while `--access-admins` names the admins. It grants sign-in and
+    never the admin interface: in `--access-admins` it fails start-up, because one entry in the wrong
+    list would make the whole domain admin. The local part must be exactly `*`; any other `*` fails
+    start-up. It matches Google sessions only.
   - `github:<numeric user id>`: digits only. A GitHub login can be renamed and the old one
     re-registered by someone else; the numeric id never is. The session id is `github:<id>`.
   - `azure:<object id>`: the Entra object id, a GUID, lower-cased. A UPN can be changed or reused;
