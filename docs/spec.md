@@ -280,7 +280,7 @@ Every route under `/v1` needs a session except the sign-in routes, `/v1/version`
 | GitHub sign-in | `--github-client-id`, `--github-client-secret`; `--github-org` restricts access to an organisation and `--github-team` to a team |
 | Microsoft Entra sign-in | `--azure-client-id`, `--azure-client-secret`, `--azure-tenant-id` |
 | Google sign-in | `--google-client-id`, `--google-client-secret`, `--google-domain` (Workspace domain, matched on the ID token `hd` claim) |
-| Access by principal | `--access-users` and `--access-admins` (or `ACCESS_USERS`, `ACCESS_ADMINS`) take `google:<address>`, `github:<numeric user id>` or `azure:<object id>`. With either list set, only listed principals sign in, checked at sign-in, on every session use and at `/authorize`; an admin also gets the write scope. An invalid list stops the server at start (ADR-066) |
+| Access by principal | `--access-users` and `--access-admins` (or `ACCESS_USERS`, `ACCESS_ADMINS`) take `google:<address>`, `google:*@<domain>` (users list only: sign-in, never admin), `github:<numeric user id>` or `azure:<object id>`. With either list set, only listed principals sign in, checked at sign-in, on every session use and at `/authorize`; an admin also gets the write scope. An invalid list stops the server at start (ADR-066) |
 | Session | A 24-hour `xray_session` cookie. The same token is accepted as `Authorization: Bearer`, and on a WebSocket upgrade as a subprotocol, because a browser cannot set headers on that handshake |
 | Session to another origin | A login may hand its token to a UI on a different host through `?ui=<origin>`, only for origins in `--ui-callback-origins`. Empty by default |
 | MCP, shared secret | A Secret named by `--mcp-token-secret`, key `token`. Full scope |
