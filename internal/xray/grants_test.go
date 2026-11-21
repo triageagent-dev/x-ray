@@ -335,3 +335,41 @@ func TestNewAccessGrants_BlankListFailsClosed(t *testing.T) {
 	_, err := NewAccessGrants("", "  ", "example.com")
 	assert.NoError(t, err, "an unset or whitespace-only value is an empty list")
 }
+
+// google:*@<domain> admits the whole Workspace domain in --access-users, so a
+// deployment can let the domain in and name its admins one by one. Before it was
+// understood, the * was taken literally: it matched no address and, with a list
+// set, nobody could sign in.
+func TestAccessGrants_DomainWildcardAdmitsTheDomainNotItsAdmins(t *testing.T) {
+	g, err := NewAccessGrants("google:*@Example.com", "google:boss@example.com", "example.com")
+	require.NoError(t, err)
+
+	assert.True(t, g.allowsUser("google:1", "alice@example.com"), "anyone in the domain signs in")
+	assert.True(t, g.allowsUser("google:2", "Bob@EXAMPLE.com"), "case does not matter")
+	assert.False(t, g.allowsUser("google:3", "mallory@other.test"), "another domain does not")
+	assert.False(t, g.allowsUser("google:4", "x@sub.example.com"), "a subdomain is not the domain")
+	assert.False(t, g.allowsUser("google:5", "kK@example.com"), "a non-ASCII address matches nothing")
+	assert.False(t, g.allowsUser("github:42", "alice@example.com"), "a GitHub session never matches a Google principal")
+
+	assert.False(t, g.isAdmin("google:1", "alice@example.com"), "the wildcard grants sign-in, not the admin interface")
+	assert.True(t, g.isAdmin("google:9", "boss@example.com"), "an admin named one by one is")
+}
+
+func TestAccessGrants_DomainWildcardIsRefusedWhereItWouldMisleadOrLockOut(t *testing.T) {
+	for name, tc := range map[string]struct{ users, admins string }{
+		"as an admin":          {"", "google:*@example.com"},
+		"inside a name":        {"google:a*@example.com", ""},
+		"suffix of a name":     {"google:*a@example.com", ""},
+		"another domain":       {"google:*@other.test", ""},
+		"a subdomain":          {"google:*@sub.example.com", ""},
+		"two stars":            {"google:**@example.com", ""},
+		"for another provider": {"github:*", ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := NewAccessGrants(tc.users, tc.admins, "example.com")
+			assert.Error(t, err, "refused at start, with a message, rather than matching nobody")
+		})
+	}
+	_, err := NewAccessGrants("google:*@example.com", "", "")
+	assert.Error(t, err, "google principals still need --google-domain")
+}

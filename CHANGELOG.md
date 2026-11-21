@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- **`google:*@<domain>` in `--access-users` admits the whole Workspace domain (ADR-066).** With `--access-admins` set and no users list, only the admins could sign in, so letting a domain in meant naming every address. The wildcard grants sign-in only; in `--access-admins`, or with a `*` anywhere else in an address, the server refuses to start with a message. Before, such an entry was read literally, matched no address and, with the list set, nobody could sign in.
+
 ## [2.10.0] - 2026-11-19
 
 ### Added

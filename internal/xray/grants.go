@@ -28,6 +28,11 @@ func SetAccessGrants(g AccessGrants) { grants = g }
 
 const principalForms = "google:<address>, github:<numeric user id>, azure:<object id>"
 
+// domainWildcard is the local part that stands for every address in the Workspace
+// domain: google:*@<domain>. It grants sign-in only, so --access-users can admit
+// the domain while --access-admins names the people who get the admin interface.
+const domainWildcard = "*"
+
 var azureOID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // NewAccessGrants parses comma-separated principal lists. A google address must
@@ -38,25 +43,25 @@ var azureOID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 // same ids the session carries: a login or UPN can be renamed and re-registered.
 func NewAccessGrants(users, admins, domain string) (AccessGrants, error) {
 	domain = strings.ToLower(strings.TrimSpace(domain))
-	u, err := parsePrincipals(users, domain)
+	u, err := parsePrincipals(users, domain, true)
 	if err != nil {
 		return AccessGrants{}, fmt.Errorf("access users: %w", err)
 	}
-	a, err := parsePrincipals(admins, domain)
+	a, err := parsePrincipals(admins, domain, false)
 	if err != nil {
 		return AccessGrants{}, fmt.Errorf("access admins: %w", err)
 	}
 	return AccessGrants{users: u, admins: a}, nil
 }
 
-func parsePrincipals(list, domain string) ([]string, error) {
+func parsePrincipals(list, domain string, wildcard bool) ([]string, error) {
 	var out []string
 	for _, e := range strings.Split(list, ",") {
 		e = strings.TrimSpace(e)
 		if e == "" {
 			continue
 		}
-		p, err := parsePrincipal(e, domain)
+		p, err := parsePrincipal(e, domain, wildcard)
 		if err != nil {
 			return nil, err
 		}
@@ -70,7 +75,7 @@ func parsePrincipals(list, domain string) ([]string, error) {
 	return out, nil
 }
 
-func parsePrincipal(e, domain string) (string, error) {
+func parsePrincipal(e, domain string, wildcard bool) (string, error) {
 	if !isASCII(e) {
 		return "", fmt.Errorf("%q is not ASCII; use one of %s", e, principalForms)
 	}
@@ -84,6 +89,17 @@ func parsePrincipal(e, domain string) (string, error) {
 		local, host, ok := strings.Cut(id, "@")
 		if !ok || local == "" {
 			return "", fmt.Errorf("%q is not an address; use one of %s", e, principalForms)
+		}
+		if strings.Contains(local, domainWildcard) {
+			// Only the whole-domain form, only where it grants sign-in alone. Any other
+			// use of * would be taken as a literal and match no address, which with a
+			// list set locks everyone out.
+			if local != domainWildcard {
+				return "", fmt.Errorf("%q: * stands only for the whole domain, google:*@%s", e, domain)
+			}
+			if !wildcard {
+				return "", fmt.Errorf("%q: a domain wildcard grants sign-in only; name each admin", e)
+			}
 		}
 		if domain == "" {
 			return "", fmt.Errorf("google principals need --google-domain")
@@ -144,7 +160,17 @@ func (g AccessGrants) allowsUser(userID, username string) bool {
 		return true
 	}
 	p := principalOf(userID, username)
-	return slices.Contains(g.users, p) || slices.Contains(g.admins, p)
+	return slices.Contains(g.users, p) || slices.Contains(g.admins, p) || g.domainAdmits(p)
+}
+
+// domainAdmits reports whether a Google principal's address is in a domain the
+// users list admits whole (google:*@<domain>).
+func (g AccessGrants) domainAdmits(p string) bool {
+	if !strings.HasPrefix(p, "google:") {
+		return false
+	}
+	_, host, ok := strings.Cut(strings.TrimPrefix(p, "google:"), "@")
+	return ok && slices.Contains(g.users, "google:"+domainWildcard+"@"+host)
 }
 
 // isAdmin reports whether a session gets the admin interface by principal.

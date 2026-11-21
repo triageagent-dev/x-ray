@@ -26,7 +26,10 @@ configuration, never from code. They work for every sign-in provider:
     domain, so an address in a secondary domain cannot be listed. A non-ASCII address never matches a
     list (and signs in as before when no list is set). A Google session's
     name is the full address so the list can match it; reassigning an address inside Workspace
-    moves its access with it.
+    moves its access with it. `google:*@<domain>` in `--access-users` admits every address of
+    `--google-domain`, so a deployment can let the domain in and name its admins one by one. It
+    grants sign-in only: in `--access-admins`, or with a `*` anywhere else in the address, it fails
+    start-up. (A `*` read literally would match no address and, with a list set, lock everyone out.)
   - `github:<numeric user id>`: digits only. A GitHub login can be renamed and the old one
     re-registered by someone else; the numeric id never is. The session id is `github:<id>`.
   - `azure:<object id>`: the Entra object id, a GUID, lower-cased. A UPN can be changed or reused;
