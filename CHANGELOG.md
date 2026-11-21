@@ -5,6 +5,9 @@
 ### Added
 - **`google:*@<domain>` in `--access-users` admits every Google account of `--google-domain` (ADR-066).** With `--access-admins` set only listed principals sign in, so a deployment could not admit its whole Workspace while naming the admins by address. The entry admits every account as a member and the admins stay named. It grants sign-in only: in `--access-admins`, or with a `*` anywhere else in an address, or for another domain, the server refuses to start with a message. It matches Google sessions only. Without it nothing changes.
 
+### Fixed
+- **The memory map no longer crashes the page when a recall lights cells.** The production build dropped `d3-transition`, so `selection.interrupt()` and `.transition()` did not exist and a hit threw `a.interrupt is not a function`. The map now imports `d3-transition` explicitly (`d3` is `sideEffects: false`), and it is a direct dependency of the UI.
+
 ## [2.10.0] - 2026-11-19
 
 ### Added
